@@ -1,7 +1,6 @@
+import os
 import streamlit as st
-import sqlite3
 import pandas as pd
-import json
 from datetime import datetime
 import threading
 import time
@@ -9,38 +8,26 @@ import requests
 import re
 from bs4 import BeautifulSoup
 from pathlib import Path
+from pymongo import MongoClient
+from dotenv import load_dotenv
 
-PORTFOLIO_FILE = 'portfolio.json'
-DB_FILE = 'psx_prices.db'
+load_dotenv()
+MONGO_URI = os.getenv("MONGO_URI")
+DB_NAME = os.getenv("DB_NAME")
+
+@st.cache_resource(show_spinner=False)
+def get_mongo():
+    client = MongoClient(MONGO_URI)
+    db = client[DB_NAME]
+    return db
 
 # --- DB Setup ---
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS prices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            price REAL,
-            change_value REAL,
-            percentage TEXT,
-            direction TEXT,
-            fetched_at TEXT
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            trade_type TEXT NOT NULL, -- Buy/Sell
-            quantity REAL NOT NULL,
-            price REAL NOT NULL,
-            trade_date TEXT NOT NULL,
-            notes TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    db = get_mongo()
+    # Collections are created automatically in MongoDB on first insert
+    # Optionally, create indexes for performance
+    db.prices.create_index([('symbol', 1), ('fetched_at', -1)])
+    db.trades.create_index([('symbol', 1), ('trade_date', -1)])
 
 # --- Price Fetch Logic ---
 def fetch_price(symbol):
@@ -81,12 +68,15 @@ def fetch_price(symbol):
     return price, change_value, percentage, direction
 
 def save_price(symbol, price, change_value, percentage, direction):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''INSERT INTO prices (symbol, price, change_value, percentage, direction, fetched_at) VALUES (?, ?, ?, ?, ?, ?)''',
-        (symbol, price, change_value, percentage, direction, datetime.now().isoformat()))
-    conn.commit()
-    conn.close()
+    db = get_mongo()
+    db.prices.insert_one({
+        'symbol': symbol,
+        'price': price,
+        'change_value': change_value,
+        'percentage': percentage,
+        'direction': direction,
+        'fetched_at': datetime.now().isoformat()
+    })
 
 def fetch_and_save_all(tickers):
     for symbol in tickers:
@@ -122,37 +112,87 @@ st.title("📈 PSX Portfolio Dashboard")
 
 init_db()
 
-# Load tickers from portfolio.json
-if not Path(PORTFOLIO_FILE).exists():
-    st.error(f"Portfolio file {PORTFOLIO_FILE} not found.")
-    st.stop()
-with open(PORTFOLIO_FILE) as f:
-    data = json.load(f)
-tickers = data.get('tickers', [])
+# --- Portfolio Table Logic ---
+def get_portfolio_symbols():
+    db = get_mongo()
+    symbols = db.portfolio.find({}, {"_id": 0, "symbol": 1})
+    return [doc["symbol"] for doc in symbols]
 
-# Sidebar: Fetch prices
-if st.sidebar.button("Fetch Latest Prices", help="Fetch latest prices for all tickers"):
-    fetch_and_save_all(tickers)
-    st.sidebar.success("Prices updated!")
+def add_portfolio_symbol(symbol):
+    db = get_mongo()
+    db.portfolio.update_one({"symbol": symbol}, {"$set": {"symbol": symbol}}, upsert=True)
 
-# Sidebar: Add trade
-st.sidebar.header("Log Trade")
-with st.sidebar.form("trade_form"):
-    trade_symbol = st.selectbox("Symbol", tickers)
-    trade_type = st.selectbox("Type", ["Buy", "Sell"])
-    trade_qty = st.number_input("Quantity", min_value=1.0, step=1.0)
-    trade_price = st.number_input("Price", min_value=0.0, step=0.01)
-    trade_date = st.date_input("Date", value=datetime.now().date())
-    trade_notes = st.text_input("Notes")
-    submitted = st.form_submit_button("Add Trade")
-    if submitted:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute('''INSERT INTO trades (symbol, trade_type, quantity, price, trade_date, notes) VALUES (?, ?, ?, ?, ?, ?)''',
-            (trade_symbol, trade_type, trade_qty, trade_price, trade_date.isoformat(), trade_notes))
-        conn.commit()
-        conn.close()
-        st.sidebar.success("Trade logged!")
+def remove_portfolio_symbol(symbol):
+    db = get_mongo()
+    db.portfolio.delete_one({"symbol": symbol})
+    db.trades.delete_many({"symbol": symbol})
+    db.prices.delete_many({"symbol": symbol})
+
+# Get portfolio symbols before sidebar and all uses
+portfolio_symbols = get_portfolio_symbols()
+
+# Sidebar: Portfolio Management
+with st.sidebar:
+    st.markdown("""
+    <style>
+    .sidebar-section {margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid #444;}
+    .sidebar-title {font-size: 1.2rem; font-weight: bold; margin-bottom: 0.5rem; color: #ffb703;}
+    .sidebar-label {font-size: 0.95rem; color: #bbb; margin-bottom: 0.2rem;}
+    .sidebar-btn {margin-top: 0.5rem; margin-bottom: 0.5rem;}
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">📊 Manage Portfolio Symbols</div>', unsafe_allow_html=True)
+    new_symbol = st.text_input("Add Symbol to Portfolio", "")
+    add_col, remove_col = st.columns([1,1])
+    with add_col:
+        if st.button("➕ Add Symbol", key="add_symbol_btn"):
+            if new_symbol and new_symbol not in portfolio_symbols:
+                add_portfolio_symbol(new_symbol)
+                st.success(f"Added {new_symbol} to portfolio.")
+                st.rerun()
+            else:
+                st.warning("Symbol already in portfolio or empty.")
+    st.markdown('<div class="sidebar-label">Remove Symbol</div>', unsafe_allow_html=True)
+    remove_symbol = st.selectbox("", [s for s in portfolio_symbols], key="remove_symbol") if portfolio_symbols else None
+    # Move remove button below dropdown
+    if remove_symbol:
+        if st.button("🗑️ Remove Selected", key="remove_symbol_btn"):
+            remove_portfolio_symbol(remove_symbol)
+            st.success(f"Removed {remove_symbol} and its trades/prices.")
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">🔄 Price Actions</div>', unsafe_allow_html=True)
+    if st.button("💹 Fetch Latest Prices", help="Fetch latest prices for all symbols", key="fetch_prices_btn"):
+        fetch_and_save_all(portfolio_symbols)
+        st.success("Prices updated!")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-title">📝 Log Trade</div>', unsafe_allow_html=True)
+    with st.form("trade_form"):
+        trade_symbol = st.selectbox("Symbol", portfolio_symbols)
+        trade_type = st.selectbox("Type", ["Buy", "Sell"])
+        trade_qty = st.number_input("Quantity", min_value=1.0, step=1.0)
+        trade_price = st.number_input("Price", min_value=0.0, step=0.01)
+        trade_date = st.date_input("Date", value=datetime.now().date())
+        trade_notes = st.text_input("Notes")
+        submitted = st.form_submit_button("Add Trade")
+        if submitted:
+            db = get_mongo()
+            db.trades.insert_one({
+                'symbol': trade_symbol,
+                'trade_type': trade_type,
+                'quantity': trade_qty,
+                'price': trade_price,
+                'trade_date': trade_date.isoformat(),
+                'notes': trade_notes
+            })
+            st.success("Trade logged!")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- Auto-refresh every 60 seconds ---
 REFRESH_INTERVAL = 300  # seconds
@@ -160,7 +200,7 @@ if 'last_refresh' not in st.session_state:
     st.session_state['last_refresh'] = time.time()
 
 if time.time() - st.session_state['last_refresh'] > REFRESH_INTERVAL:
-    fetch_and_save_all(tickers)
+    fetch_and_save_all(portfolio_symbols)
     st.session_state['last_refresh'] = time.time()
     st.experimental_rerun()
 
@@ -168,34 +208,49 @@ st.info(f"Auto-refresh every {REFRESH_INTERVAL} seconds. Last refresh: {datetime
 
 # --- Portfolio Analytics ---
 def get_latest_prices():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query('''
-        SELECT symbol, price, change_value, percentage, direction, MAX(fetched_at) as last_update
-        FROM prices
-        WHERE symbol IN ({})
-        GROUP BY symbol
-    '''.format(','.join(['?']*len(tickers))), conn, params=tickers)
-    conn.close()
+    db = get_mongo()
+    pipeline = [
+        {"$match": {"symbol": {"$in": portfolio_symbols}}},
+        {"$sort": {"fetched_at": -1}},
+        {"$group": {
+            "_id": "$symbol",
+            "symbol": {"$first": "$symbol"},
+            "price": {"$first": "$price"},
+            "change_value": {"$first": "$change_value"},
+            "percentage": {"$first": "$percentage"},
+            "direction": {"$first": "$direction"},
+            "last_update": {"$first": "$fetched_at"}
+        }}
+    ]
+    rows = list(db.prices.aggregate(pipeline))
+    df = pd.DataFrame(rows)
+    if '_id' in df.columns:
+        df = df.drop(columns=['_id'])
     return df
 
 def get_trades():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query('''SELECT * FROM trades''', conn)
-    conn.close()
+    db = get_mongo()
+    rows = list(db.trades.find())
+    df = pd.DataFrame(rows)
+    if '_id' in df.columns:
+        df = df.drop(columns=['_id'])
     return df
 
 prices_df = get_latest_prices()
 trades_df = get_trades()
 
-# Calculate positions and analytics
 def calc_portfolio(prices_df, trades_df):
     summary = []
-    for symbol in tickers:
+    if 'symbol' not in trades_df.columns:
+        trades_df['symbol'] = None
+    if 'symbol' not in prices_df.columns:
+        prices_df['symbol'] = None
+    for symbol in portfolio_symbols:
         trades = trades_df[trades_df['symbol'] == symbol]
-        buys = trades[trades['trade_type'] == 'Buy']
-        sells = trades[trades['trade_type'] == 'Sell']
-        qty_bought = buys['quantity'].sum()
-        qty_sold = sells['quantity'].sum()
+        buys = trades[trades['trade_type'] == 'Buy'] if 'trade_type' in trades.columns else pd.DataFrame()
+        sells = trades[trades['trade_type'] == 'Sell'] if 'trade_type' in trades.columns else pd.DataFrame()
+        qty_bought = buys['quantity'].sum() if 'quantity' in buys.columns else 0
+        qty_sold = sells['quantity'].sum() if 'quantity' in sells.columns else 0
         net_qty = qty_bought - qty_sold
         avg_buy = (buys['quantity'] * buys['price']).sum() / qty_bought if qty_bought > 0 else 0
         latest_row = prices_df[prices_df['symbol'] == symbol]
@@ -222,9 +277,12 @@ st.subheader("Portfolio Overview")
 st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
 
 st.subheader("Trade Logs")
-selected_symbol = st.selectbox("Select Symbol to View Trade Log", tickers)
-filtered_trades = trades_df[trades_df['symbol'] == selected_symbol].sort_values('trade_date', ascending=False)
+selected_symbol = st.selectbox("Select Symbol to View Trade Log", portfolio_symbols)
+filtered_trades = trades_df[trades_df['symbol'] == selected_symbol]
+if 'trade_date' not in filtered_trades.columns:
+    filtered_trades['trade_date'] = ''
 if not filtered_trades.empty:
+    filtered_trades = filtered_trades.sort_values('trade_date', ascending=False)
     st.dataframe(filtered_trades, use_container_width=True, hide_index=True)
 else:
     st.info(f"No trades found for {selected_symbol}.")
