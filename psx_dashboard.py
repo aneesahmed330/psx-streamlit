@@ -203,8 +203,11 @@ st.subheader("Portfolio Overview")
 st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
 
 st.subheader("Trade Logs")
-for symbol in tickers:
-    st.markdown(f"### {symbol} Trades")
-    st.dataframe(trades_df[trades_df['symbol'] == symbol].sort_values('trade_date', ascending=False), use_container_width=True, hide_index=True)
+selected_symbol = st.selectbox("Select Symbol to View Trade Log", tickers)
+filtered_trades = trades_df[trades_df['symbol'] == selected_symbol].sort_values('trade_date', ascending=False)
+if not filtered_trades.empty:
+    st.dataframe(filtered_trades, use_container_width=True, hide_index=True)
+else:
+    st.info(f"No trades found for {selected_symbol}.")
 
 st.caption("Made with Streamlit. Data auto-refreshes on price fetch or trade log.")
