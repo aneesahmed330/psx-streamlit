@@ -97,6 +97,25 @@ def fetch_and_save_all(tickers):
         except Exception as e:
             st.warning(f"Error fetching {symbol}: {e}")
 
+# --- Login Logic ---
+def show_login():
+    st.title("🔒 PSX Portfolio Login")
+    with st.form("login_form"):
+        email = st.text_input("Email", value="", key="login_email")
+        password = st.text_input("Password", type="password", value="", key="login_pass")
+        submitted = st.form_submit_button("Login")
+        if submitted:
+            if email == "anees.ahmed@techverx.com" and password == "87654321":
+                st.session_state["authenticated"] = True
+                st.success("Login successful! Redirecting...")
+                st.rerun()
+            else:
+                st.error("Invalid credentials. Please try again.")
+
+if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
+    show_login()
+    st.stop()
+
 # --- Streamlit UI ---
 st.set_page_config(page_title="PSX Portfolio Dashboard", layout="wide", page_icon="📈", initial_sidebar_state="expanded")
 st.title("📈 PSX Portfolio Dashboard")
