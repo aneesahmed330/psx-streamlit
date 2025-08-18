@@ -24,3 +24,6 @@ jobs:
 
       - name: Run script
         run: python fetch_prices.py
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          DB_NAME: ${{ secrets.DB_NAME }}
