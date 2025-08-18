@@ -9,8 +9,10 @@ import concurrent.futures
 import random
 
 load_dotenv()
-MONGO_URI = os.getenv("MONGO_URI")
-DB_NAME = os.getenv("DB_NAME")
+# MONGO_URI = os.getenv("MONGO_URI")
+MONGO_URI = "mongodb+srv://coolminded682:7JogkfWtfUZcCWkZ@cluster0.zv3vun7.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+# DB_NAME = os.getenv("DB_NAME")
+DB_NAME = "psx_portfolio"
 
 USER_AGENTS = [
     # Windows Chrome
