@@ -1,0 +1,26 @@
+name: Python Cron Job (Trading Hours)
+
+on:
+  schedule:
+    # Every 5 minutes Mon-Fri from 09:00–16:00 PKT (04:00–11:59 UTC)
+    - cron: "*/5 4-11 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f cron_requirement.txt ]; then pip install -r cron_requirement.txt; fi
+
+      - name: Run script
+        run: python fetch_prices.py
