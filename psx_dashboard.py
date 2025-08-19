@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from pathlib import Path
 from pymongo import MongoClient
 from dotenv import load_dotenv
+import pytz
 
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
@@ -95,7 +96,7 @@ def show_login():
         password = st.text_input("Password", type="password", value="", key="login_pass")
         submitted = st.form_submit_button("Login")
         if submitted:
-            if email == "anees.ahmed@techverx.com" and password == "87654321":
+            if email == "123" and password == "123":
                 st.session_state["authenticated"] = True
                 st.success("Login successful! Redirecting...")
                 st.rerun()
@@ -135,19 +136,21 @@ portfolio_symbols = get_portfolio_symbols()
 with st.sidebar:
     st.markdown("""
     <style>
-    .sidebar-section {margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid #444;}
-    .sidebar-title {font-size: 1.2rem; font-weight: bold; margin-bottom: 0.5rem; color: #ffb703;}
-    .sidebar-label {font-size: 0.95rem; color: #bbb; margin-bottom: 0.2rem;}
-    .sidebar-btn {margin-top: 0.5rem; margin-bottom: 0.5rem;}
+    .sidebar-section {margin-bottom: 2rem; padding-bottom: 1.2rem; border-bottom: 1px solid #333; background: #23272f; border-radius: 10px; box-shadow: 0 2px 8px #0002;}
+    .sidebar-title {font-size: 1.18rem; font-weight: bold; margin-bottom: 0.6rem; color: #ffb703; letter-spacing: 0.5px;}
+    .sidebar-label {font-size: 1.01rem; color: #bbb; margin-bottom: 0.3rem;}
+    .sidebar-btn {margin-top: 0.7rem; margin-bottom: 0.7rem; width: 100%; font-weight: 600;}
+    .sidebar-input {background: #18191a; color: #eee; border-radius: 6px; border: 1px solid #444; padding: 0.4em 0.7em;}
+    .sidebar-selectbox {background: #18191a; color: #eee; border-radius: 6px; border: 1px solid #444;}
     </style>
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-title">📊 Manage Portfolio Symbols</div>', unsafe_allow_html=True)
-    new_symbol = st.text_input("Add Symbol to Portfolio", "")
+    st.markdown('<div class="sidebar-title">📊 Portfolio Symbols</div>', unsafe_allow_html=True)
+    new_symbol = st.text_input("Add Symbol", "", key="add_symbol_input", help="Enter PSX symbol (e.g. UBL)")
     add_col, remove_col = st.columns([1,1])
     with add_col:
-        if st.button("➕ Add Symbol", key="add_symbol_btn"):
+        if st.button("➕ Add", key="add_symbol_btn", help="Add symbol to portfolio"):
             if new_symbol and new_symbol not in portfolio_symbols:
                 add_portfolio_symbol(new_symbol)
                 st.success(f"Added {new_symbol} to portfolio.")
@@ -155,10 +158,9 @@ with st.sidebar:
             else:
                 st.warning("Symbol already in portfolio or empty.")
     st.markdown('<div class="sidebar-label">Remove Symbol</div>', unsafe_allow_html=True)
-    remove_symbol = st.selectbox("", [s for s in portfolio_symbols], key="remove_symbol") if portfolio_symbols else None
-    # Move remove button below dropdown
+    remove_symbol = st.selectbox("", [s for s in portfolio_symbols], key="remove_symbol", help="Select symbol to remove") if portfolio_symbols else None
     if remove_symbol:
-        if st.button("🗑️ Remove Selected", key="remove_symbol_btn"):
+        if st.button("🗑️ Remove", key="remove_symbol_btn", help="Remove selected symbol"):
             remove_portfolio_symbol(remove_symbol)
             st.success(f"Removed {remove_symbol} and its trades/prices.")
             st.rerun()
@@ -166,21 +168,19 @@ with st.sidebar:
 
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-title">🔄 Price Actions</div>', unsafe_allow_html=True)
-    if st.button("💹 Fetch Latest Prices", help="Fetch latest prices for all symbols", key="fetch_prices_btn"):
-        fetch_and_save_all(portfolio_symbols)
-        st.success("Prices updated!")
+    st.button("💹 Fetch Latest Prices", help="Fetch latest prices for all symbols", key="fetch_prices_btn", use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-title">📝 Log Trade</div>', unsafe_allow_html=True)
     with st.form("trade_form"):
-        trade_symbol = st.selectbox("Symbol", portfolio_symbols)
-        trade_type = st.selectbox("Type", ["Buy", "Sell"])
-        trade_qty = st.number_input("Quantity", min_value=1.0, step=1.0)
-        trade_price = st.number_input("Price", min_value=0.0, step=0.01)
-        trade_date = st.date_input("Date", value=datetime.now().date())
-        trade_notes = st.text_input("Notes")
-        submitted = st.form_submit_button("Add Trade")
+        trade_symbol = st.selectbox("Symbol", portfolio_symbols, key="trade_symbol", help="Select symbol for trade")
+        trade_type = st.selectbox("Type", ["Buy", "Sell"], key="trade_type", help="Buy or Sell")
+        trade_qty = st.number_input("Quantity", min_value=1.0, step=1.0, key="trade_qty", help="Number of shares")
+        trade_price = st.number_input("Price", min_value=0.0, step=0.01, key="trade_price", help="Trade price per share")
+        trade_date = st.date_input("Date", value=datetime.now().date(), key="trade_date", help="Trade date")
+        trade_notes = st.text_input("Notes", key="trade_notes", help="Optional notes")
+        submitted = st.form_submit_button("Add Trade", use_container_width=True)
         if submitted:
             db = get_mongo()
             db.trades.insert_one({
@@ -241,10 +241,10 @@ trades_df = get_trades()
 
 def calc_portfolio(prices_df, trades_df):
     summary = []
-    if 'symbol' not in trades_df.columns:
-        trades_df['symbol'] = None
-    if 'symbol' not in prices_df.columns:
-        prices_df['symbol'] = None
+    total_investment = 0
+    total_market_value = 0
+    total_unrealized_pl = 0
+    pk_tz = pytz.timezone('Asia/Karachi')
     for symbol in portfolio_symbols:
         trades = trades_df[trades_df['symbol'] == symbol]
         buys = trades[trades['trade_type'] == 'Buy'] if 'trade_type' in trades.columns else pd.DataFrame()
@@ -257,7 +257,24 @@ def calc_portfolio(prices_df, trades_df):
         latest_price = latest_row['price'].values[0] if not latest_row.empty else None
         latest_percentage = latest_row['percentage'].values[0] if not latest_row.empty else None
         market_value = net_qty * latest_price if latest_price is not None else 0
+        investment = avg_buy * net_qty
         unrealized_pl = (latest_price - avg_buy) * net_qty if latest_price is not None else 0
+        percent_updown = ((latest_price - avg_buy) / avg_buy * 100) if avg_buy > 0 and latest_price is not None else 0
+        total_investment += investment
+        total_market_value += market_value
+        total_unrealized_pl += unrealized_pl
+        last_update_raw = latest_row['last_update'].values[0] if not latest_row.empty else None
+        if last_update_raw:
+            try:
+                dt = datetime.fromisoformat(last_update_raw)
+                if dt.tzinfo is None:
+                    dt = pytz.timezone('Asia/Karachi').localize(dt)
+                dt_pk = dt.astimezone(pk_tz)
+                last_update = dt_pk.strftime('%Y-%m-%d %I:%M %p')
+            except Exception:
+                last_update = last_update_raw
+        else:
+            last_update = None
         summary.append({
             'Symbol': symbol,
             'Shares Held': net_qty,
@@ -265,16 +282,91 @@ def calc_portfolio(prices_df, trades_df):
             'Latest Price': latest_price,
             'Change %': latest_percentage,
             'Market Value': round(market_value, 2),
+            'Investment': round(investment, 2),
+            '% Up/Down': percent_updown,
             'Unrealized P/L': round(unrealized_pl, 2),
-            'Last Update': latest_row['last_update'].values[0] if not latest_row.empty else None
+            'Last Update': last_update
         })
-    return pd.DataFrame(summary)
+    total_percent_updown = ((total_market_value - total_investment) / total_investment * 100) if total_investment > 0 else 0
+    return pd.DataFrame(summary), total_investment, total_market_value, total_unrealized_pl, total_percent_updown
 
-portfolio_df = calc_portfolio(prices_df, trades_df)
+portfolio_df, total_investment, total_market_value, total_unrealized_pl, total_percent_updown = calc_portfolio(prices_df, trades_df)
 
 # --- Dashboard Layout ---
 st.subheader("Portfolio Overview")
-st.dataframe(portfolio_df, use_container_width=True, hide_index=True)
+
+# Last Data Refresh
+st.markdown(f"<span style='color:#bbb;'>Last Data Refresh: <b>{datetime.now(pytz.timezone('Asia/Karachi')).strftime('%Y-%m-%d %I:%M %p')}</b></span>", unsafe_allow_html=True)
+
+# Card-style summary boxes
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.markdown(f"""
+    <div style='background:#23272f;padding:1.2em 1em 1em 1em;border-radius:10px;text-align:center;'>
+    <span style='font-size:1.1em;color:#bbb;'>💰 Total Investment</span><br>
+    <span style='font-size:1.3em;font-weight:bold;color:#ffb703;'>Rs. {total_investment:,.2f}</span>
+    </div>
+    """, unsafe_allow_html=True)
+with col2:
+    st.markdown(f"""
+    <div style='background:#23272f;padding:1.2em 1em 1em 1em;border-radius:10px;text-align:center;'>
+    <span style='font-size:1.1em;color:#bbb;'>📈 Portfolio Market Value</span><br>
+    <span style='font-size:1.3em;font-weight:bold;color:#00e676;'>Rs. {total_market_value:,.2f}</span>
+    </div>
+    """, unsafe_allow_html=True)
+with col3:
+    st.markdown(f"""
+    <div style='background:#23272f;padding:1.2em 1em 1em 1em;border-radius:10px;text-align:center;'>
+    <span style='font-size:1.1em;color:#bbb;'>🟢 Unrealized P/L</span><br>
+    <span style='font-size:1.3em;font-weight:bold;color:{'lime' if total_unrealized_pl>=0 else 'red'};'>Rs. {total_unrealized_pl:,.2f}</span>
+    </div>
+    """, unsafe_allow_html=True)
+with col4:
+    st.markdown(f"""
+    <div style='background:#23272f;padding:1.2em 1em 1em 1em;border-radius:10px;text-align:center;'>
+    <span style='font-size:1.1em;color:#bbb;'>% Up/Down</span><br>
+    <span style='font-size:1.3em;font-weight:bold;color:{'lime' if total_percent_updown>=0 else 'red'};'>{total_percent_updown:.2f}%</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("<div style='height: 2.5em;'></div>", unsafe_allow_html=True)
+
+# --- Portfolio Allocation Pie Chart ---
+if not portfolio_df.empty:
+    pie_df = portfolio_df[portfolio_df['Market Value'] > 0][['Symbol', 'Market Value']]
+    st.plotly_chart({
+        'data': [{
+            'labels': pie_df['Symbol'],
+            'values': pie_df['Market Value'],
+            'type': 'pie',
+            'hole': .4,
+            'marker': {'colors': ['#00e676', '#ffb703', '#23272f', '#2196f3', '#e53935', '#8e24aa', '#43a047', '#fbc02d', '#3949ab', '#00838f']}
+        }],
+        'layout': {'title': 'Portfolio Allocation', 'paper_bgcolor': '#18191a', 'font': {'color': '#bbb'}}
+    }, use_container_width=True)
+
+# --- Color Coding for Table ---
+def colorize(val, pos_color='lime', neg_color='red'):
+    if pd.isnull(val):
+        return ''
+    try:
+        v = float(val)
+        if v > 0:
+            return f'color: {pos_color}'
+        elif v < 0:
+            return f'color: {neg_color}'
+    except:
+        pass
+    return ''
+
+styled_df = portfolio_df.style.applymap(colorize, subset=['% Up/Down', 'Unrealized P/L'])
+
+# --- Download as CSV ---
+st.download_button('Download Portfolio (CSV)', portfolio_df.to_csv(index=False), file_name='psx_portfolio.csv', mime='text/csv', use_container_width=True)
+
+st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config={
+    "% Up/Down": st.column_config.NumberColumn(format="%.2f%%")
+})
 
 st.subheader("Trade Logs")
 selected_symbol = st.selectbox("Select Symbol to View Trade Log", portfolio_symbols)
