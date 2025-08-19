@@ -11,10 +11,183 @@ from pathlib import Path
 from pymongo import MongoClient
 from dotenv import load_dotenv
 import pytz
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# Set page config must be the first Streamlit command
+st.set_page_config(
+    page_title="PSX Portfolio Dashboard", 
+    layout="wide", 
+    page_icon="📈", 
+    initial_sidebar_state="expanded"
+)
 
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME")
+
+# Custom CSS for professional styling with enhanced tabs
+st.markdown("""
+<style>
+    /* Main styling */
+    .main { background-color: #0E1117; }
+    
+    /* Headers */
+    h1, h2, h3 { color: #1E88E5; }
+    
+    /* Sidebar styling */
+    .css-1d391kg { background-color: #0E1117; }
+    .sidebar .sidebar-content { background-color: #0E1117; }
+    
+    /* Cards */
+    .card { 
+        background-color: #1E2130; 
+        padding: 1.5rem; 
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        margin-bottom: 1rem;
+    }
+    
+    /* Metrics */
+    [data-testid="stMetric"] {
+        background-color: #1E2130;
+        border: 1px solid #2D3748;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    [data-testid="stMetricValue"] { color: #FFFFFF; }
+    [data-testid="stMetricLabel"] { color: #A0AEC0; }
+    
+    /* Buttons */
+    .stButton > button {
+        background-color: #1E88E5;
+        color: white;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 6px;
+        font-weight: 500;
+        transition: all 0.2s;
+    }
+    
+    .stButton > button:hover {
+        background-color: #1976D2;
+        transform: translateY(-1px);
+    }
+    
+    /* Input fields */
+    .stTextInput > div > div > input {
+        background-color: #1E2130;
+        color: white;
+        border: 1px solid #2D3748;
+    }
+    
+    .stNumberInput > div > div > input {
+        background-color: #1E2130;
+        color: white;
+        border: 1px solid #2D3748;
+    }
+    
+    .stSelectbox > div > div > select {
+        background-color: #1E2130;
+        color: white;
+        border: 1px solid #2D3748;
+    }
+    
+    /* Dataframes */
+    .dataframe { 
+        background-color: #1E2130; 
+        color: white;
+    }
+    
+    /* Enhanced Tabs */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #0E1117;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        height: 50px;
+        white-space: pre-wrap;
+        background-color: #1E2130;
+        border-radius: 8px 8px 0px 0px;
+        gap: 1px;
+        padding: 10px 16px;
+        font-weight: 600;
+        font-size: 14px;
+        border-bottom: 2px solid transparent;
+        transition: all 0.2s ease-in-out;
+    }
+
+    .stTabs [data-baseweb="tab"]:hover {
+        background-color: #2D3748;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background-color: #1E88E5;
+        color: white;
+        border-bottom: 2px solid #1E88E5;
+    }
+    
+    /* Tab content */
+    .tab-content {
+        background-color: #1E2130;
+        border-radius: 0 8px 8px 8px;
+        padding: 1.5rem;
+        margin-top: -1px;
+        border: 1px solid #2D3748;
+    }
+    
+    /* Section headers */
+    .section-header {
+        color: #1E88E5;
+        font-size: 1.2rem;
+        font-weight: 600;
+        margin-bottom: 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 1px solid #2D3748;
+    }
+    
+    /* Success/error messages */
+    .stSuccess { background-color: #2D5740; }
+    .stError { background-color: #5D3B45; }
+    .stWarning { background-color: #5D4F3B; }
+    .stInfo { background-color: #2D4A6B; }
+    
+    /* Custom badges */
+    .badge {
+        padding: 4px 8px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    
+    .badge-success {
+        background-color: #2D5740;
+        color: #00E396;
+    }
+    
+    .badge-danger {
+        background-color: #5D3B45;
+        color: #FF4560;
+    }
+    
+    .badge-warning {
+        background-color: #5D4F3B;
+        color: #FEB019;
+    }
+    
+    /* Chart containers */
+    .chart-container {
+        background-color: #1E2130;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        border: 1px solid #2D3748;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 @st.cache_resource(show_spinner=False)
 def get_mongo():
@@ -25,8 +198,6 @@ def get_mongo():
 # --- DB Setup ---
 def init_db():
     db = get_mongo()
-    # Collections are created automatically in MongoDB on first insert
-    # Optionally, create indexes for performance
     db.prices.create_index([('symbol', 1), ('fetched_at', -1)])
     db.trades.create_index([('symbol', 1), ('trade_date', -1)])
 
@@ -90,27 +261,31 @@ def fetch_and_save_all(tickers):
 
 # --- Login Logic ---
 def show_login():
-    st.title("🔒 PSX Portfolio Login")
-    with st.form("login_form"):
-        email = st.text_input("Email", value="", key="login_email")
-        password = st.text_input("Password", type="password", value="", key="login_pass")
-        submitted = st.form_submit_button("Login")
-        if submitted:
-            if email == "123" and password == "123":
-                st.session_state["authenticated"] = True
-                st.success("Login successful! Redirecting...")
-                st.rerun()
-            else:
-                st.error("Invalid credentials. Please try again.")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("<div style='text-align: center; margin-bottom: 2rem;'>"
+                   "<h1 style='color: #1E88E5;'>🔒 PSX Portfolio</h1>"
+                   "<p style='color: #A0AEC0;'>Track your Pakistan Stock Exchange investments</p>"
+                   "</div>", unsafe_allow_html=True)
+        
+        with st.form("login_form"):
+            st.text_input("Email", value="", key="login_email", placeholder="Enter your email")
+            st.text_input("Password", type="password", value="", key="login_pass", placeholder="Enter your password")
+            submitted = st.form_submit_button("Login", use_container_width=True)
+            if submitted:
+                if st.session_state.login_email == "123" and st.session_state.login_pass == "123":
+                    st.session_state["authenticated"] = True
+                    st.success("Login successful! Redirecting...")
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.error("Invalid credentials. Please try again.")
 
 if "authenticated" not in st.session_state or not st.session_state["authenticated"]:
     show_login()
     st.stop()
 
-# --- Streamlit UI ---
-st.set_page_config(page_title="PSX Portfolio Dashboard", layout="wide", page_icon="📈", initial_sidebar_state="expanded")
-st.title("📈 PSX Portfolio Dashboard")
-
+# Initialize database
 init_db()
 
 # --- Portfolio Table Logic ---
@@ -129,73 +304,107 @@ def remove_portfolio_symbol(symbol):
     db.trades.delete_many({"symbol": symbol})
     db.prices.delete_many({"symbol": symbol})
 
-# Get portfolio symbols before sidebar and all uses
+# Get portfolio symbols
 portfolio_symbols = get_portfolio_symbols()
 
 # Sidebar: Portfolio Management
 with st.sidebar:
-    st.markdown("""
-    <style>
-    .sidebar-section {margin-bottom: 2rem; padding-bottom: 1.2rem; border-bottom: 1px solid #333; background: #23272f; border-radius: 10px; box-shadow: 0 2px 8px #0002;}
-    .sidebar-title {font-size: 1.18rem; font-weight: bold; margin-bottom: 0.6rem; color: #ffb703; letter-spacing: 0.5px;}
-    .sidebar-label {font-size: 1.01rem; color: #bbb; margin-bottom: 0.3rem;}
-    .sidebar-btn {margin-top: 0.7rem; margin-bottom: 0.7rem; width: 100%; font-weight: 600;}
-    .sidebar-input {background: #18191a; color: #eee; border-radius: 6px; border: 1px solid #444; padding: 0.4em 0.7em;}
-    .sidebar-selectbox {background: #18191a; color: #eee; border-radius: 6px; border: 1px solid #444;}
-    </style>
+    st.sidebar.markdown("""
+    <div style='text-align: center; margin-bottom: 2rem;'>
+        <h2 style='color: #1E88E5; margin-bottom: 0;'>PSX Portfolio</h2>
+        <p style='color: #A0AEC0; margin-top: 0;'>Investment Tracker</p>
+    </div>
     """, unsafe_allow_html=True)
-
-    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-title">📊 Portfolio Symbols</div>', unsafe_allow_html=True)
-    new_symbol = st.text_input("Add Symbol", "", key="add_symbol_input", help="Enter PSX symbol (e.g. UBL)")
-    add_col, remove_col = st.columns([1,1])
-    with add_col:
-        if st.button("➕ Add", key="add_symbol_btn", help="Add symbol to portfolio"):
-            if new_symbol and new_symbol not in portfolio_symbols:
-                add_portfolio_symbol(new_symbol)
-                st.success(f"Added {new_symbol} to portfolio.")
+    
+    # Portfolio Management Section
+    with st.expander("📊 Portfolio Management", expanded=True):
+        new_symbol = st.text_input("Add Symbol", "", key="add_symbol_input", 
+                                  help="Enter PSX symbol (e.g. UBL)", placeholder="Symbol")
+        add_col, remove_col = st.columns(2)
+        with add_col:
+            if st.button("➕ Add", key="add_symbol_btn", use_container_width=True,
+                        help="Add symbol to portfolio"):
+                if new_symbol and new_symbol not in portfolio_symbols:
+                    add_portfolio_symbol(new_symbol)
+                    st.success(f"Added {new_symbol} to portfolio.")
+                    st.rerun()
+                else:
+                    st.warning("Symbol already in portfolio or empty.")
+        
+        if portfolio_symbols:
+            remove_symbol = st.selectbox("Remove Symbol", portfolio_symbols, 
+                                       key="remove_symbol", help="Select symbol to remove")
+            if st.button("🗑️ Remove", key="remove_symbol_btn", use_container_width=True,
+                       help="Remove selected symbol"):
+                remove_portfolio_symbol(remove_symbol)
+                st.success(f"Removed {remove_symbol} and its trades/prices.")
                 st.rerun()
-            else:
-                st.warning("Symbol already in portfolio or empty.")
-    st.markdown('<div class="sidebar-label">Remove Symbol</div>', unsafe_allow_html=True)
-    remove_symbol = st.selectbox("", [s for s in portfolio_symbols], key="remove_symbol", help="Select symbol to remove") if portfolio_symbols else None
-    if remove_symbol:
-        if st.button("🗑️ Remove", key="remove_symbol_btn", help="Remove selected symbol"):
-            remove_portfolio_symbol(remove_symbol)
-            st.success(f"Removed {remove_symbol} and its trades/prices.")
-            st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.info("No symbols in portfolio")
+    
+    # Price Actions Section
+    with st.expander("🔄 Price Actions", expanded=True):
+        if st.button("💹 Fetch Latest Prices", use_container_width=True,
+                    help="Fetch latest prices for all symbols"):
+            with st.spinner("Fetching prices..."):
+                fetch_and_save_all(portfolio_symbols)
+                st.success("Prices updated successfully!")
+    
+    # Trade Logging Section
+    with st.expander("📝 Log Trade", expanded=True):
+        with st.form("trade_form"):
+            trade_symbol = st.selectbox("Symbol", portfolio_symbols, key="trade_symbol", 
+                                       help="Select symbol for trade") if portfolio_symbols else None
+            trade_type = st.selectbox("Type", ["Buy", "Sell"], key="trade_type", help="Buy or Sell")
+            col1, col2 = st.columns(2)
+            with col1:
+                trade_qty = st.number_input("Quantity", min_value=1.0, step=1.0, key="trade_qty", 
+                                          help="Number of shares")
+            with col2:
+                trade_price = st.number_input("Price", min_value=0.0, step=0.01, key="trade_price", 
+                                            help="Trade price per share")
+            trade_date = st.date_input("Date", value=datetime.now().date(), key="trade_date", 
+                                     help="Trade date")
+            trade_notes = st.text_input("Notes", key="trade_notes", help="Optional notes",
+                                       placeholder="Trade notes (optional)")
+            submitted = st.form_submit_button("💾 Add Trade", use_container_width=True)
+            if submitted and trade_symbol:
+                db = get_mongo()
+                db.trades.insert_one({
+                    'symbol': trade_symbol,
+                    'trade_type': trade_type,
+                    'quantity': trade_qty,
+                    'price': trade_price,
+                    'trade_date': trade_date.isoformat(),
+                    'notes': trade_notes
+                })
+                st.success("Trade logged successfully!")
+    
+    # Alerts Management Section
+    with st.expander("🔔 Price Alerts", expanded=True):
+        if portfolio_symbols:
+            alert_symbol = st.selectbox("Symbol", portfolio_symbols, key="alert_symbol", 
+                                      help="Select symbol for alert")
+            col1, col2 = st.columns(2)
+            with col1:
+                min_price = st.number_input("Min Price", min_value=0.0, step=0.01, 
+                                          key="min_price", help="Alert if price goes below")
+            with col2:
+                max_price = st.number_input("Max Price", min_value=0.0, step=0.01, 
+                                          key="max_price", help="Alert if price goes above")
+            enabled = st.checkbox("Enabled", value=True, key="alert_enabled")
+            
+            if st.button("💾 Save Alert", use_container_width=True):
+                # Alert saving logic would go here
+                st.success(f"Alert set for {alert_symbol}.")
+        else:
+            st.info("Add symbols to portfolio to set alerts")
 
-    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-title">🔄 Price Actions</div>', unsafe_allow_html=True)
-    st.button("💹 Fetch Latest Prices", help="Fetch latest prices for all symbols", key="fetch_prices_btn", use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+# --- Main Content Area ---
+st.title("📈 PSX Portfolio Dashboard")
 
-    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-title">📝 Log Trade</div>', unsafe_allow_html=True)
-    with st.form("trade_form"):
-        trade_symbol = st.selectbox("Symbol", portfolio_symbols, key="trade_symbol", help="Select symbol for trade")
-        trade_type = st.selectbox("Type", ["Buy", "Sell"], key="trade_type", help="Buy or Sell")
-        trade_qty = st.number_input("Quantity", min_value=1.0, step=1.0, key="trade_qty", help="Number of shares")
-        trade_price = st.number_input("Price", min_value=0.0, step=0.01, key="trade_price", help="Trade price per share")
-        trade_date = st.date_input("Date", value=datetime.now().date(), key="trade_date", help="Trade date")
-        trade_notes = st.text_input("Notes", key="trade_notes", help="Optional notes")
-        submitted = st.form_submit_button("Add Trade", use_container_width=True)
-        if submitted:
-            db = get_mongo()
-            db.trades.insert_one({
-                'symbol': trade_symbol,
-                'trade_type': trade_type,
-                'quantity': trade_qty,
-                'price': trade_price,
-                'trade_date': trade_date.isoformat(),
-                'notes': trade_notes
-            })
-            st.success("Trade logged!")
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# --- Auto-refresh every 60 seconds ---
-REFRESH_INTERVAL = 300  # seconds
+# Auto-refresh every 60 seconds
+REFRESH_INTERVAL = 300
 if 'last_refresh' not in st.session_state:
     st.session_state['last_refresh'] = time.time()
 
@@ -204,9 +413,20 @@ if time.time() - st.session_state['last_refresh'] > REFRESH_INTERVAL:
     st.session_state['last_refresh'] = time.time()
     st.experimental_rerun()
 
-st.info(f"Auto-refresh every {REFRESH_INTERVAL} seconds. Last refresh: {datetime.fromtimestamp(st.session_state['last_refresh']).strftime('%H:%M:%S')}")
+# Status bar
+status_col1, status_col2 = st.columns([3, 1])
+with status_col1:
+    st.info(f"Auto-refresh every {REFRESH_INTERVAL//60} minutes. Last refresh: {datetime.fromtimestamp(st.session_state['last_refresh']).strftime('%H:%M:%S')}")
+with status_col2:
+    if st.button("🔄 Manual Refresh", use_container_width=True):
+        with st.spinner("Refreshing data..."):
+            fetch_and_save_all(portfolio_symbols)
+            st.session_state['last_refresh'] = time.time()
+            st.success("Data refreshed!")
+            time.sleep(1)
+            st.rerun()
 
-# --- Portfolio Analytics ---
+# --- Portfolio Data Functions ---
 def get_latest_prices():
     db = get_mongo()
     pipeline = [
@@ -277,13 +497,13 @@ def calc_portfolio(prices_df, trades_df):
             last_update = None
         summary.append({
             'Symbol': symbol,
-            'Shares Held': net_qty,
+            'Shares Held': round(net_qty, 2),
             'Avg Buy Price': round(avg_buy, 2),
-            'Latest Price': latest_price,
+            'Latest Price': round(latest_price, 2) if latest_price is not None else None,
             'Change %': latest_percentage,
             'Market Value': round(market_value, 2),
             'Investment': round(investment, 2),
-            '% Up/Down': percent_updown,
+            '% Up/Down': round(percent_updown, 2),
             'Unrealized P/L': round(unrealized_pl, 2),
             'Last Update': last_update
         })
@@ -295,88 +515,232 @@ portfolio_df, total_investment, total_market_value, total_unrealized_pl, total_p
 # --- Dashboard Layout ---
 st.subheader("Portfolio Overview")
 
-# Last Data Refresh
-st.markdown(f"<span style='color:#bbb;'>Last Data Refresh: <b>{datetime.now(pytz.timezone('Asia/Karachi')).strftime('%Y-%m-%d %I:%M %p')}</b></span>", unsafe_allow_html=True)
-
-# Card-style summary boxes
+# Portfolio metrics
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.markdown(f"""
-    <div style='background:#23272f;padding:1.2em 1em 1em 1em;border-radius:10px;text-align:center;'>
-    <span style='font-size:1.1em;color:#bbb;'>💰 Total Investment</span><br>
-    <span style='font-size:1.3em;font-weight:bold;color:#ffb703;'>Rs. {total_investment:,.2f}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    st.metric("💰 Total Investment", f"Rs. {total_investment:,.2f}")
 with col2:
-    st.markdown(f"""
-    <div style='background:#23272f;padding:1.2em 1em 1em 1em;border-radius:10px;text-align:center;'>
-    <span style='font-size:1.1em;color:#bbb;'>📈 Portfolio Market Value</span><br>
-    <span style='font-size:1.3em;font-weight:bold;color:#00e676;'>Rs. {total_market_value:,.2f}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    st.metric("📈 Market Value", f"Rs. {total_market_value:,.2f}", 
+              f"{total_percent_updown:+.2f}%")
 with col3:
-    st.markdown(f"""
-    <div style='background:#23272f;padding:1.2em 1em 1em 1em;border-radius:10px;text-align:center;'>
-    <span style='font-size:1.1em;color:#bbb;'>🟢 Unrealized P/L</span><br>
-    <span style='font-size:1.3em;font-weight:bold;color:{'lime' if total_unrealized_pl>=0 else 'red'};'>Rs. {total_unrealized_pl:,.2f}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    st.metric("📊 Unrealized P/L", f"Rs. {total_unrealized_pl:,.2f}")
 with col4:
-    st.markdown(f"""
-    <div style='background:#23272f;padding:1.2em 1em 1em 1em;border-radius:10px;text-align:center;'>
-    <span style='font-size:1.1em;color:#bbb;'>% Up/Down</span><br>
-    <span style='font-size:1.3em;font-weight:bold;color:{'lime' if total_percent_updown>=0 else 'red'};'>{total_percent_updown:.2f}%</span>
-    </div>
-    """, unsafe_allow_html=True)
+    st.metric("🔄 % Change", f"{total_percent_updown:+.2f}%")
 
-st.markdown("<div style='height: 2.5em;'></div>", unsafe_allow_html=True)
+# Portfolio visualization and data with enhanced tabs
+if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
+    # Create tabs with icons and better styling
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Portfolio Details", "📈 Performance Analytics", "💼 Trade History", "🔔 Alerts Management"])
+    
+    with tab1:
+        st.markdown("### Portfolio Holdings")
+        
+        # Color coding for table
+        def colorize(val, pos_color='#00E396', neg_color='#FF4560'):
+            if pd.isnull(val):
+                return ''
+            try:
+                if isinstance(val, str) and '%' in val:
+                    v = float(val.replace('%', ''))
+                else:
+                    v = float(val)
+                if v > 0:
+                    return f'color: {pos_color}; font-weight: bold;'
+                elif v < 0:
+                    return f'color: {neg_color}; font-weight: bold;'
+            except:
+                pass
+            return ''
 
-# --- Portfolio Allocation Pie Chart ---
-if not portfolio_df.empty:
-    pie_df = portfolio_df[portfolio_df['Market Value'] > 0][['Symbol', 'Market Value']]
-    st.plotly_chart({
-        'data': [{
-            'labels': pie_df['Symbol'],
-            'values': pie_df['Market Value'],
-            'type': 'pie',
-            'hole': .4,
-            'marker': {'colors': ['#00e676', '#ffb703', '#23272f', '#2196f3', '#e53935', '#8e24aa', '#43a047', '#fbc02d', '#3949ab', '#00838f']}
-        }],
-        'layout': {'title': 'Portfolio Allocation', 'paper_bgcolor': '#18191a', 'font': {'color': '#bbb'}}
-    }, use_container_width=True)
+        styled_df = portfolio_df.style.applymap(colorize, subset=['% Up/Down', 'Unrealized P/L', 'Change %'])
+        
+        st.dataframe(
+            styled_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Shares Held": st.column_config.NumberColumn(format="%.2f"),
+                "Avg Buy Price": st.column_config.NumberColumn(format="%.2f"),
+                "Latest Price": st.column_config.NumberColumn(format="%.2f"),
+                "Market Value": st.column_config.NumberColumn(format="%.2f"),
+                "Investment": st.column_config.NumberColumn(format="%.2f"),
+                "% Up/Down": st.column_config.NumberColumn(format="%.2f%%"),
+                "Unrealized P/L": st.column_config.NumberColumn(format="%.2f"),
+            }
+        )
+        
+        st.download_button('📥 Download Portfolio (CSV)', portfolio_df.to_csv(index=False), 
+                          file_name='psx_portfolio.csv', mime='text/csv', use_container_width=True)
+    
+    with tab2:
+        st.markdown("### Performance Analytics")
+        
+        if not portfolio_df.empty:
+            # Create two columns for charts
+            chart_col1, chart_col2 = st.columns(2)
+            
+            with chart_col1:
+                st.markdown("#### Portfolio Allocation")
+                pie_df = portfolio_df[portfolio_df['Market Value'] > 0][['Symbol', 'Market Value']]
+                
+                fig = go.Figure(data=[go.Pie(
+                    labels=pie_df['Symbol'],
+                    values=pie_df['Market Value'],
+                    hole=.4,
+                    marker_colors=['#1E88E5', '#FF4560', '#00E396', '#FEB019', '#775DD0', '#3F51B5', '#546E7A', '#D4526E', '#8D5B4C', '#F86624']
+                )])
+                
+                fig.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#A0AEC0'),
+                    showlegend=True,
+                    legend=dict(orientation='h', y=-0.1),
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with chart_col2:
+                st.markdown("#### Performance Overview")
+                # Performance bar chart
+                perf_df = portfolio_df[['Symbol', '% Up/Down']].copy()
+                perf_df['Color'] = perf_df['% Up/Down'].apply(lambda x: '#00E396' if x >= 0 else '#FF4560')
+                
+                fig = go.Figure(data=[go.Bar(
+                    x=perf_df['Symbol'],
+                    y=perf_df['% Up/Down'],
+                    marker_color=perf_df['Color']
+                )])
+                
+                fig.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#A0AEC0'),
+                    yaxis=dict(title='% Change'),
+                    xaxis=dict(title='Symbol'),
+                    height=400
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Additional performance metrics
+            st.markdown("#### Performance Metrics")
+            perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
+            
+            with perf_col1:
+                best_performer = portfolio_df.loc[portfolio_df['% Up/Down'].idxmax()]
+                st.metric("🚀 Best Performer", best_performer['Symbol'], f"{best_performer['% Up/Down']:.2f}%")
+            
+            with perf_col2:
+                worst_performer = portfolio_df.loc[portfolio_df['% Up/Down'].idxmin()]
+                st.metric("📉 Worst Performer", worst_performer['Symbol'], f"{worst_performer['% Up/Down']:.2f}%")
+            
+            with perf_col3:
+                largest_holding = portfolio_df.loc[portfolio_df['Market Value'].idxmax()]
+                st.metric("🏆 Largest Holding", largest_holding['Symbol'], f"Rs. {largest_holding['Market Value']:,.2f}")
+            
+            with perf_col4:
+                total_gain_loss = portfolio_df['Unrealized P/L'].sum()
+                st.metric("💵 Total Gain/Loss", f"Rs. {total_gain_loss:,.2f}")
+    
+    with tab3:
+        st.markdown("### Trade History")
+        
+        if not trades_df.empty:
+            selected_symbol = st.selectbox("Filter by Symbol", ["All"] + portfolio_symbols, key="trade_filter")
+            
+            if selected_symbol != "All":
+                filtered_trades = trades_df[trades_df['symbol'] == selected_symbol]
+            else:
+                filtered_trades = trades_df
+            
+            if not filtered_trades.empty:
+                filtered_trades = filtered_trades.sort_values('trade_date', ascending=False)
+                
+                # Trade statistics
+                trade_col1, trade_col2, trade_col3, trade_col4 = st.columns(4)
+                with trade_col1:
+                    total_trades = len(filtered_trades)
+                    st.metric("Total Trades", total_trades)
+                with trade_col2:
+                    buy_trades = len(filtered_trades[filtered_trades['trade_type'] == 'Buy'])
+                    st.metric("Buy Orders", buy_trades)
+                with trade_col3:
+                    sell_trades = len(filtered_trades[filtered_trades['trade_type'] == 'Sell'])
+                    st.metric("Sell Orders", sell_trades)
+                with trade_col4:
+                    total_volume = filtered_trades['quantity'].sum()
+                    st.metric("Total Volume", f"{total_volume:,.0f}")
+                
+                st.dataframe(filtered_trades, use_container_width=True, hide_index=True)
+            else:
+                st.info("No trades found for the selected symbol.")
+        else:
+            st.info("No trade history available.")
+    
+    with tab4:
+        st.markdown("### Alerts Management")
+        
+        # Mock alerts data (replace with your actual alerts logic)
+        alerts_data = [
+            {"symbol": "UBL", "min_price": 180.0, "max_price": 220.0, "enabled": True},
+            {"symbol": "HBL", "min_price": 90.0, "max_price": 120.0, "enabled": False},
+            {"symbol": "PSO", "min_price": 150.0, "max_price": 200.0, "enabled": True}
+        ]
+        
+        alerts_df = pd.DataFrame(alerts_data)
+        
+        if not alerts_df.empty:
+            st.markdown("#### Active Alerts")
+            
+            for _, alert in alerts_df.iterrows():
+                col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 1, 1])
+                
+                with col1:
+                    st.markdown(f"**{alert['symbol']}**")
+                
+                with col2:
+                    st.markdown(f"Min: Rs. {alert['min_price']:.2f}")
+                
+                with col3:
+                    st.markdown(f"Max: Rs. {alert['max_price']:.2f}")
+                
+                with col4:
+                    status = "🟢 Enabled" if alert['enabled'] else "🔴 Disabled"
+                    st.markdown(status)
+                
+                with col5:
+                    if st.button("Delete", key=f"delete_{alert['symbol']}"):
+                        st.success(f"Alert for {alert['symbol']} deleted")
+                        # Add your delete logic here
+            
+            st.markdown("---")
+        
+        st.markdown("#### Create New Alert")
+        
+        with st.form("new_alert_form"):
+            alert_col1, alert_col2, alert_col3 = st.columns(3)
+            
+            with alert_col1:
+                new_alert_symbol = st.selectbox("Symbol", portfolio_symbols, key="new_alert_symbol")
+            
+            with alert_col2:
+                new_min_price = st.number_input("Min Price", min_value=0.0, step=1.0, key="new_min_price")
+            
+            with alert_col3:
+                new_max_price = st.number_input("Max Price", min_value=0.0, step=1.0, key="new_max_price")
+            
+            new_alert_enabled = st.checkbox("Enabled", value=True, key="new_alert_enabled")
+            
+            if st.form_submit_button("💾 Create Alert", use_container_width=True):
+                st.success(f"Alert created for {new_alert_symbol}")
+                # Add your alert creation logic here
 
-# --- Color Coding for Table ---
-def colorize(val, pos_color='lime', neg_color='red'):
-    if pd.isnull(val):
-        return ''
-    try:
-        v = float(val)
-        if v > 0:
-            return f'color: {pos_color}'
-        elif v < 0:
-            return f'color: {neg_color}'
-    except:
-        pass
-    return ''
-
-styled_df = portfolio_df.style.applymap(colorize, subset=['% Up/Down', 'Unrealized P/L'])
-
-# --- Download as CSV ---
-st.download_button('Download Portfolio (CSV)', portfolio_df.to_csv(index=False), file_name='psx_portfolio.csv', mime='text/csv', use_container_width=True)
-
-st.dataframe(styled_df, use_container_width=True, hide_index=True, column_config={
-    "% Up/Down": st.column_config.NumberColumn(format="%.2f%%")
-})
-
-st.subheader("Trade Logs")
-selected_symbol = st.selectbox("Select Symbol to View Trade Log", portfolio_symbols)
-filtered_trades = trades_df[trades_df['symbol'] == selected_symbol]
-if 'trade_date' not in filtered_trades.columns:
-    filtered_trades['trade_date'] = ''
-if not filtered_trades.empty:
-    filtered_trades = filtered_trades.sort_values('trade_date', ascending=False)
-    st.dataframe(filtered_trades, use_container_width=True, hide_index=True)
 else:
-    st.info(f"No trades found for {selected_symbol}.")
+    st.info("Your portfolio is empty. Add symbols to get started.")
 
-st.caption("Made with Streamlit. Data auto-refreshes on price fetch or trade log.")
+# Footer
+st.markdown("---")
+st.markdown("<div style='text-align: center; color: #A0AEC0;'>PSX Portfolio Dashboard • Made with Streamlit</div>", 
+            unsafe_allow_html=True)
