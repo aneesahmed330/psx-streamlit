@@ -1,7 +1,8 @@
 import os
 import requests
 import re
-from datetime import datetime
+from datetime import datetime, time
+import pytz
 from bs4 import BeautifulSoup
 from pymongo import MongoClient
 from dotenv import load_dotenv
@@ -30,6 +31,27 @@ USER_AGENTS = [
     # iPhone Safari
     'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
 ]
+
+def is_trading_time():
+    """Check if current time is within Pakistan trading hours (Mon-Fri, 9AM-4PM PKT)"""
+    # Create timezone objects
+    utc_tz = pytz.utc
+    pkt_tz = pytz.timezone('Asia/Karachi')
+    
+    # Get current time in UTC and convert to PKT
+    utc_now = datetime.now(utc_tz)
+    pkt_now = utc_now.astimezone(pkt_tz)
+    
+    # Check if it's a weekday (0=Monday, 4=Friday)
+    if pkt_now.weekday() > 4:  # 5=Saturday, 6=Sunday
+        return False
+    
+    # Check if time is between 9:00 and 16:00 (4PM)
+    trading_start = time(9, 0)
+    trading_end = time(16, 0)
+    current_time = pkt_now.time()
+    
+    return trading_start <= current_time <= trading_end
 
 def get_mongo():
     client = MongoClient(MONGO_URI)
@@ -109,6 +131,13 @@ def fetch_and_save_symbol(symbol):
         print(f"Error fetching {symbol}: {e}")
 
 def fetch_and_save_all():
+    # Check if we're in trading hours
+    if not is_trading_time():
+        pkt_tz = pytz.timezone('Asia/Karachi')
+        pkt_now = datetime.now(pytz.utc).astimezone(pkt_tz)
+        print(f"Not in trading hours. Current PKT time: {pkt_now.strftime('%Y-%m-%d %H:%M:%S %Z%z')}")
+        return
+    
     db = get_mongo()
     symbols = db.portfolio.find({}, {"_id": 0, "symbol": 1})
     tickers = [doc["symbol"] for doc in symbols]

@@ -2,8 +2,7 @@ name: Python Cron Job (Trading Hours)
 
 on:
   schedule:
-    # Every 5 minutes Mon-Fri from 09:00–16:00 PKT (04:00–11:59 UTC)
-    - cron: "*/5 4-11 * * 1-5"
+    - cron: "*/5 4-10 * * 1-5"   # Stops at 10:55 UTC (3:55 PM PKT)
   workflow_dispatch:
 
 jobs:
