@@ -241,13 +241,15 @@ def fetch_price(symbol):
 
 def save_price(symbol, price, change_value, percentage, direction):
     db = get_mongo()
+    pk_tz = pytz.timezone('Asia/Karachi')
+    fetched_at = datetime.now(pk_tz).isoformat()
     db.prices.insert_one({
         'symbol': symbol,
         'price': price,
         'change_value': change_value,
         'percentage': percentage,
         'direction': direction,
-        'fetched_at': datetime.now().isoformat()
+        'fetched_at': fetched_at
     })
 
 def fetch_and_save_all(tickers):
@@ -416,7 +418,9 @@ if time.time() - st.session_state['last_refresh'] > REFRESH_INTERVAL:
 # Status bar
 status_col1, status_col2 = st.columns([3, 1])
 with status_col1:
-    st.info(f"Auto-refresh every {REFRESH_INTERVAL//60} minutes. Last refresh: {datetime.fromtimestamp(st.session_state['last_refresh']).strftime('%H:%M:%S')}")
+    pk_tz = pytz.timezone('Asia/Karachi')
+    last_refresh_dt = datetime.fromtimestamp(st.session_state['last_refresh'], tz=pk_tz)
+    st.info(f"Auto-refresh every {REFRESH_INTERVAL//60} minutes. Last refresh: {last_refresh_dt.strftime('%Y-%m-%d %I:%M:%S %p')} (PKT)")
 with status_col2:
     if st.button("🔄 Manual Refresh", use_container_width=True):
         with st.spinner("Refreshing data..."):
@@ -455,6 +459,31 @@ def get_trades():
     if '_id' in df.columns:
         df = df.drop(columns=['_id'])
     return df
+
+def get_trades_with_pct_change(trades_df, prices_df):
+    # Add 'Percentage Change' and 'P/L Amount' columns to each trade row
+    latest_price_map = dict(zip(prices_df['symbol'], prices_df['price']))
+    trades_df = trades_df.copy()
+    trades_df['Percentage Change'] = None
+    trades_df['P/L Amount'] = None
+    for idx, row in trades_df.iterrows():
+        symbol = row['symbol']
+        trade_price = row['price']
+        quantity = row['quantity'] if 'quantity' in row else 0
+        trade_type = row['trade_type'] if 'trade_type' in row else 'Buy'
+        latest_price = latest_price_map.get(symbol)
+        if latest_price and trade_price:
+            pct = ((latest_price - trade_price) / trade_price) * 100
+            trades_df.at[idx, 'Percentage Change'] = f"{pct:.2f}"
+            # For Buy trades, P/L = (latest - buy) * qty; for Sell, can be 0 or (sell - latest) * qty
+            if trade_type == 'Buy':
+                pl = (latest_price - trade_price) * quantity
+            elif trade_type == 'Sell':
+                pl = (trade_price - latest_price) * quantity
+            else:
+                pl = 0
+            trades_df.at[idx, 'P/L Amount'] = f"{pl:.2f}"
+    return trades_df
 
 prices_df = get_latest_prices()
 trades_df = get_trades()
@@ -520,8 +549,7 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("💰 Total Investment", f"Rs. {total_investment:,.2f}")
 with col2:
-    st.metric("📈 Market Value", f"Rs. {total_market_value:,.2f}", 
-              f"{total_percent_updown:+.2f}%")
+    st.metric("📈 Market Value", f"Rs. {total_market_value:,.2f}")
 with col3:
     st.metric("📊 Unrealized P/L", f"Rs. {total_unrealized_pl:,.2f}")
 with col4:
@@ -646,20 +674,38 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
     
     with tab3:
         st.markdown("### Trade History")
-        
+        # --- Date Range Filter ---
+        min_date = trades_df['trade_date'].min() if not trades_df.empty else None
+        max_date = trades_df['trade_date'].max() if not trades_df.empty else None
+        date_range = None
+        if min_date and max_date:
+            min_date_obj = pd.to_datetime(min_date).date()
+            max_date_obj = pd.to_datetime(max_date).date()
+            date_range = st.date_input(
+                "Filter by Date Range",
+                value=(min_date_obj, max_date_obj),
+                min_value=min_date_obj,
+                max_value=max_date_obj,
+                key="trade_date_range"
+            )
         if not trades_df.empty:
             selected_symbol = st.selectbox("Filter by Symbol", ["All"] + portfolio_symbols, key="trade_filter")
-            
             if selected_symbol != "All":
                 filtered_trades = trades_df[trades_df['symbol'] == selected_symbol]
             else:
                 filtered_trades = trades_df
-            
+            # --- Apply date filter if selected ---
+            if date_range and isinstance(date_range, tuple) and len(date_range) == 2:
+                start_date, end_date = date_range
+                filtered_trades = filtered_trades[(pd.to_datetime(filtered_trades['trade_date']).dt.date >= start_date) & (pd.to_datetime(filtered_trades['trade_date']).dt.date <= end_date)]
             if not filtered_trades.empty:
                 filtered_trades = filtered_trades.sort_values('trade_date', ascending=False)
-                
+                # Add percentage change and P/L amount columns
+                filtered_trades = get_trades_with_pct_change(filtered_trades, prices_df)
+                # --- Calculate total invested for filtered trades (Buy only) ---
+                total_invested = filtered_trades[filtered_trades['trade_type'] == 'Buy'].apply(lambda row: row['quantity'] * row['price'], axis=1).sum() if not filtered_trades.empty else 0
                 # Trade statistics
-                trade_col1, trade_col2, trade_col3, trade_col4 = st.columns(4)
+                trade_col1, trade_col2, trade_col3, trade_col4, trade_col5 = st.columns([1,1,1,1.5,1.5])
                 with trade_col1:
                     total_trades = len(filtered_trades)
                     st.metric("Total Trades", total_trades)
@@ -670,12 +716,33 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     sell_trades = len(filtered_trades[filtered_trades['trade_type'] == 'Sell'])
                     st.metric("Sell Orders", sell_trades)
                 with trade_col4:
-                    total_volume = filtered_trades['quantity'].sum()
-                    st.metric("Total Volume", f"{total_volume:,.0f}")
-                
-                st.dataframe(filtered_trades, use_container_width=True, hide_index=True)
+                    st.metric(
+                        label="Total Invested",
+                        value=f"Rs. {total_invested:,.2f}",
+                        help=f"Total Invested: Rs. {total_invested:,.2f}"
+                    )
+                with trade_col5:
+                    total_pl = filtered_trades['P/L Amount'].dropna().astype(float).sum()
+                    st.metric(
+                        label="Total P/L",
+                        value=f"Rs. {total_pl:,.2f}",
+                        help=f"Total P/L: Rs. {total_pl:,.2f}"
+                    )
+                # Color function for percentage change and P/L amount
+                def pct_color(val):
+                    try:
+                        v = float(val)
+                        if v > 0:
+                            return 'color: #00E396; font-weight: bold;'
+                        elif v < 0:
+                            return 'color: #FF4560; font-weight: bold;'
+                    except:
+                        pass
+                    return ''
+                styled_trades = filtered_trades.style.applymap(pct_color, subset=['Percentage Change', 'P/L Amount'])
+                st.dataframe(styled_trades, use_container_width=True, hide_index=True)
             else:
-                st.info("No trades found for the selected symbol.")
+                st.info("No trades for selected symbol.")
         else:
             st.info("No trade history available.")
     
