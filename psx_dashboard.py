@@ -50,15 +50,52 @@ st.markdown("""
     
     /* Metrics */
     [data-testid="stMetric"] {
-        background-color: #1E2130;
-        border: 1px solid #2D3748;
-        padding: 1rem;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        background: linear-gradient(135deg, rgba(30,136,229,0.12) 0%, rgba(30,33,48,0.95) 100%);
+        border: 1.5px solid #1E88E5;
+        box-shadow: 0 6px 24px 0 rgba(30,136,229,0.10), 0 1.5px 8px 0 rgba(0,0,0,0.10);
+        border-radius: 18px;
+        padding: 1.2rem 0.8rem 1rem 0.8rem;
+        min-width: 170px;
+        min-height: 80px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: flex-start;
+        transition: box-shadow 0.2s, transform 0.2s;
+        position: relative;
+        overflow: visible;
     }
-    
-    [data-testid="stMetricValue"] { color: #FFFFFF; }
-    [data-testid="stMetricLabel"] { color: #A0AEC0; }
+    [data-testid="stMetric"]:hover {
+        box-shadow: 0 10px 32px 0 rgba(30,136,229,0.18), 0 2px 12px 0 rgba(0,0,0,0.18);
+        transform: scale(1.025);
+        border-color: #00E396;
+    }
+    [data-testid="stMetricValue"] {
+        color: #FFFFFF;
+        font-size: 1.5rem !important;
+        font-weight: 700;
+        min-width: 120px;
+        white-space: normal !important;
+        word-break: break-word !important;
+        line-height: 1.15;
+        text-align: left;
+        letter-spacing: 0.5px;
+        text-shadow: 0 2px 8px rgba(30,136,229,0.10);
+        margin-bottom: 0.2rem;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #A0AEC0;
+        font-size: 1.15rem;
+        font-weight: 600;
+        white-space: normal;
+        overflow-wrap: break-word;
+        letter-spacing: 0.2px;
+        margin-bottom: 0.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        text-shadow: 0 1px 4px rgba(30,136,229,0.08);
+    }
     
     /* Buttons */
     .stButton > button {
@@ -291,25 +328,26 @@ if "authenticated" not in st.session_state or not st.session_state["authenticate
 init_db()
 
 # --- Portfolio Table Logic ---
-def get_portfolio_symbols():
+def get_portfolio_symbols_from_trades():
     db = get_mongo()
-    symbols = db.portfolio.find({}, {"_id": 0, "symbol": 1})
-    return [doc["symbol"] for doc in symbols]
+    trades = list(db.trades.find())
+    df = pd.DataFrame(trades)
+    if df.empty:
+        return []
+    # Calculate net shares for each symbol
+    df['quantity'] = df['quantity'].astype(float)
+    df['trade_type'] = df['trade_type'].str.capitalize()
+    buy = df[df['trade_type'] == 'Buy'].groupby('symbol')['quantity'].sum()
+    sell = df[df['trade_type'] == 'Sell'].groupby('symbol')['quantity'].sum()
+    net = buy.subtract(sell, fill_value=0)
+    # Only include symbols with net shares > 0
+    symbols = net[net > 0].index.tolist()
+    return symbols
 
-def add_portfolio_symbol(symbol):
-    db = get_mongo()
-    db.portfolio.update_one({"symbol": symbol}, {"$set": {"symbol": symbol}}, upsert=True)
+# Get portfolio symbols from trades only
+portfolio_symbols = get_portfolio_symbols_from_trades()
 
-def remove_portfolio_symbol(symbol):
-    db = get_mongo()
-    db.portfolio.delete_one({"symbol": symbol})
-    db.trades.delete_many({"symbol": symbol})
-    db.prices.delete_many({"symbol": symbol})
-
-# Get portfolio symbols
-portfolio_symbols = get_portfolio_symbols()
-
-# Sidebar: Portfolio Management
+# --- Sidebar: Portfolio Management, Price Actions, Log Trade, Alerts ---
 with st.sidebar:
     st.sidebar.markdown("""
     <div style='text-align: center; margin-bottom: 2rem;'>
@@ -317,32 +355,6 @@ with st.sidebar:
         <p style='color: #A0AEC0; margin-top: 0;'>Investment Tracker</p>
     </div>
     """, unsafe_allow_html=True)
-    
-    # Portfolio Management Section
-    with st.expander("📊 Portfolio Management", expanded=True):
-        new_symbol = st.text_input("Add Symbol", "", key="add_symbol_input", 
-                                  help="Enter PSX symbol (e.g. UBL)", placeholder="Symbol")
-        add_col, remove_col = st.columns(2)
-        with add_col:
-            if st.button("➕ Add", key="add_symbol_btn", use_container_width=True,
-                        help="Add symbol to portfolio"):
-                if new_symbol and new_symbol not in portfolio_symbols:
-                    add_portfolio_symbol(new_symbol)
-                    st.success(f"Added {new_symbol} to portfolio.")
-                    st.rerun()
-                else:
-                    st.warning("Symbol already in portfolio or empty.")
-        
-        if portfolio_symbols:
-            remove_symbol = st.selectbox("Remove Symbol", portfolio_symbols, 
-                                       key="remove_symbol", help="Select symbol to remove")
-            if st.button("🗑️ Remove", key="remove_symbol_btn", use_container_width=True,
-                       help="Remove selected symbol"):
-                remove_portfolio_symbol(remove_symbol)
-                st.success(f"Removed {remove_symbol} and its trades/prices.")
-                st.rerun()
-        else:
-            st.info("No symbols in portfolio")
     
     # Price Actions Section
     with st.expander("🔄 Price Actions", expanded=True):
@@ -381,6 +393,7 @@ with st.sidebar:
                     'notes': trade_notes
                 })
                 st.success("Trade logged successfully!")
+                st.experimental_rerun()
     
     # Alerts Management Section
     with st.expander("🔔 Price Alerts", expanded=True):
@@ -395,12 +408,12 @@ with st.sidebar:
                 max_price = st.number_input("Max Price", min_value=0.0, step=0.01, 
                                           key="max_price", help="Alert if price goes above")
             enabled = st.checkbox("Enabled", value=True, key="alert_enabled")
-            
             if st.button("💾 Save Alert", use_container_width=True):
-                # Alert saving logic would go here
+                add_alert(alert_symbol, min_price, max_price, enabled)
                 st.success(f"Alert set for {alert_symbol}.")
+                st.experimental_rerun()
         else:
-            st.info("Add symbols to portfolio to set alerts")
+            st.info("Add trades to see symbols for alerts")
 
 # --- Alerts CRUD Functions ---
 
@@ -584,11 +597,39 @@ def calc_portfolio(prices_df, trades_df):
 
 portfolio_df, total_investment, total_market_value, total_unrealized_pl, total_percent_updown = calc_portfolio(prices_df, trades_df)
 
+# --- Realized Profit Calculation ---
+def calc_realized_profit(trades_df):
+    realized = 0.0
+    if trades_df.empty:
+        return 0.0
+    for symbol in trades_df['symbol'].unique():
+        symbol_trades = trades_df[trades_df['symbol'] == symbol].sort_values('trade_date')
+        # Build FIFO buy queue: list of [qty_remaining, price]
+        buy_queue = []
+        for _, row in symbol_trades.iterrows():
+            if row['trade_type'] == 'Buy':
+                buy_queue.append([row['quantity'], row['price']])
+            elif row['trade_type'] == 'Sell':
+                qty_to_sell = row['quantity']
+                sell_price = row['price']
+                # FIFO: match sell to earliest buys
+                while qty_to_sell > 0 and buy_queue:
+                    buy_qty, buy_price = buy_queue[0]
+                    matched_qty = min(qty_to_sell, buy_qty)
+                    realized += (sell_price - buy_price) * matched_qty
+                    buy_queue[0][0] -= matched_qty
+                    qty_to_sell -= matched_qty
+                    if buy_queue[0][0] == 0:
+                        buy_queue.pop(0)
+    return realized
+
+realized_profit = calc_realized_profit(trades_df)
+
 # --- Dashboard Layout ---
 st.subheader("Portfolio Overview")
 
 # Portfolio metrics
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.metric("💰 Total Investment", f"Rs. {total_investment:,.2f}")
 with col2:
@@ -596,6 +637,8 @@ with col2:
 with col3:
     st.metric("📊 Unrealized P/L", f"Rs. {total_unrealized_pl:,.2f}")
 with col4:
+    st.metric("💵 Realized Profit", f"Rs. {realized_profit:,.2f}")
+with col5:
     st.metric("🔄 % Change", f"{total_percent_updown:+.2f}%")
 
 # Portfolio visualization and data with enhanced tabs
