@@ -280,6 +280,7 @@ def save_price(symbol, price, change_value, percentage, direction):
     db = get_mongo()
     pk_tz = pytz.timezone('Asia/Karachi')
     fetched_at = datetime.now(pk_tz).isoformat()
+    # Always insert a new record, never update
     db.prices.insert_one({
         'symbol': symbol,
         'price': price,
@@ -480,6 +481,7 @@ status_col1, status_col2 = st.columns([3, 1])
 # --- Portfolio Data Functions ---
 def get_latest_prices():
     db = get_mongo()
+    # For each symbol, get the most recent price record (by fetched_at)
     pipeline = [
         {"$match": {"symbol": {"$in": portfolio_symbols}}},
         {"$sort": {"fetched_at": -1}},
@@ -517,7 +519,7 @@ def get_alerts():
 
 def get_trades_with_pct_change(trades_df, prices_df):
     # Add 'Percentage Change' and 'P/L Amount' columns to each trade row
-    latest_price_map = dict(zip(prices_df['symbol'], prices_df['price']))
+    db = get_mongo()
     trades_df = trades_df.copy()
     trades_df['Percentage Change'] = None
     trades_df['P/L Amount'] = None
@@ -526,7 +528,11 @@ def get_trades_with_pct_change(trades_df, prices_df):
         trade_price = row['price']
         quantity = row['quantity'] if 'quantity' in row else 0
         trade_type = row['trade_type'] if 'trade_type' in row else 'Buy'
-        latest_price = latest_price_map.get(symbol)
+        # Always get the latest price for this symbol from the DB
+        latest_price_doc = db.prices.find({"symbol": symbol}).sort("fetched_at", -1).limit(1)
+        latest_price = None
+        for doc in latest_price_doc:
+            latest_price = doc.get('price')
         if latest_price and trade_price:
             pct = ((latest_price - trade_price) / trade_price) * 100
             trades_df.at[idx, 'Percentage Change'] = f"{pct:.2f}"
@@ -772,49 +778,74 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     <div style='color: {'#00E396' if total_gain >= 0 else '#FF4560'}; font-size:1.1rem; font-weight:600; margin-top:0.2rem;'>{'↑ Gain' if total_gain >= 0 else '↓ Loss'}</div>
                 </div>""", unsafe_allow_html=True)
             # --- New Graph: Portfolio Value Over Time ---
+            st.markdown("<br>", unsafe_allow_html=True)
             st.markdown("#### Portfolio Value Over Time")
             db = get_mongo()
             # Get all price history for portfolio symbols
             price_history = list(db.prices.find({"symbol": {"$in": portfolio_symbols}}))
             if price_history:
                 price_hist_df = pd.DataFrame(price_history)
-                # Use errors='coerce' to handle any parsing issues and support ISO8601
                 price_hist_df['fetched_at'] = pd.to_datetime(price_hist_df['fetched_at'], errors='coerce', utc=True)
                 price_hist_df = price_hist_df.dropna(subset=['fetched_at'])
-                # Pivot to get latest price per symbol per day
-                price_hist_df['date'] = price_hist_df['fetched_at'].dt.date
-                daily_prices = price_hist_df.sort_values('fetched_at').groupby(['symbol', 'date']).last().reset_index()
-                # Get trades for net shares held per symbol per day
-                trades_df['trade_date'] = pd.to_datetime(trades_df['trade_date'])
-                trades_df['date'] = trades_df['trade_date'].dt.date
-                # Build a DataFrame with all dates in price history
-                all_dates = pd.date_range(start=daily_prices['date'].min(), end=daily_prices['date'].max())
+                price_hist_df = price_hist_df.sort_values('fetched_at')
+                # Get all unique timestamps (sorted)
+                all_times = sorted(price_hist_df['fetched_at'].unique())
+                # Ensure trade_date is always timezone-aware (UTC)
+                trades_df['trade_date'] = pd.to_datetime(trades_df['trade_date'], errors='coerce', utc=True)
                 portfolio_value = []
-                for d in all_dates:
-                    d = d.date()
+                pk_tz = pytz.timezone('Asia/Karachi')
+                for t in all_times:
                     total_value = 0
                     for symbol in portfolio_symbols:
-                        # Net shares held up to this date
-                        trades_until = trades_df[(trades_df['symbol'] == symbol) & (trades_df['date'] <= d)]
+                        # Net shares held up to this timestamp
+                        trades_until = trades_df[(trades_df['symbol'] == symbol) & (trades_df['trade_date'] <= t)]
                         qty_bought = trades_until[trades_until['trade_type'] == 'Buy']['quantity'].sum() if not trades_until.empty else 0
                         qty_sold = trades_until[trades_until['trade_type'] == 'Sell']['quantity'].sum() if not trades_until.empty else 0
                         net_qty = qty_bought - qty_sold
-                        # Latest price for this symbol on this date
-                        price_row = daily_prices[(daily_prices['symbol'] == symbol) & (daily_prices['date'] == d)]
-                        if not price_row.empty:
-                            price = price_row['price'].values[0]
-                            total_value += net_qty * price
-                    portfolio_value.append({'date': d, 'Portfolio Value': total_value})
+                        # Latest price for this symbol up to this timestamp (not just at t)
+                        price_row = price_hist_df[(price_hist_df['symbol'] == symbol) & (price_hist_df['fetched_at'] <= t)]
+                        if not price_row.empty and net_qty > 0:
+                            # Get the most recent price up to t
+                            last_price = price_row.iloc[-1]['price']
+                            total_value += net_qty * last_price
+                    # Convert UTC timestamp to PKT for display
+                    t_pkt = t.tz_convert(pk_tz)
+                    portfolio_value.append({'timestamp': t_pkt, 'Portfolio Value': total_value})
                 pv_df = pd.DataFrame(portfolio_value)
+                # --- Date Range Filter for Portfolio Value Over Time ---
+                if not pv_df.empty:
+                    min_date = pv_df['timestamp'].min().date()
+                    max_date = pv_df['timestamp'].max().date()
+                    date_range = st.date_input(
+                        "Select Date Range",
+                        value=(min_date, max_date),
+                        min_value=min_date,
+                        max_value=max_date,
+                        key="portfolio_value_date_range"
+                    )
+                    if date_range and isinstance(date_range, tuple) and len(date_range) == 2:
+                        start_date, end_date = date_range
+                        mask = (pv_df['timestamp'].dt.date >= start_date) & (pv_df['timestamp'].dt.date <= end_date)
+                        pv_df = pv_df[mask]
                 fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(x=pv_df['date'], y=pv_df['Portfolio Value'], mode='lines+markers', name='Portfolio Value', line=dict(color='#1E88E5', width=3)))
+                fig2.add_trace(go.Scatter(
+                    x=pv_df['timestamp'],
+                    y=pv_df['Portfolio Value'],
+                    mode='lines+markers',
+                    name='Portfolio Value',
+                    line=dict(color='#1E88E5', width=3),
+                    marker=dict(size=8, color='#1E88E5', opacity=0.85, line=dict(width=1, color='#fff')),
+                    hovertemplate='<b>Date/Time:</b> %{x|%b %d, %Y %I:%M %p}<br><b>Value:</b> Rs. %{y:,.0f}<extra></extra>'
+                ))
                 fig2.update_layout(
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
                     font=dict(color='#A0AEC0'),
-                    yaxis=dict(title='Portfolio Value (Rs.)'),
-                    xaxis=dict(title='Date'),
-                    height=350
+                    yaxis=dict(title='Portfolio Value (Rs.)', tickformat=',', separatethousands=True),
+                    xaxis=dict(title='Date/Time (PKT)', tickangle=30, showgrid=True, tickformat='%b %d\n%I:%M %p'),
+                    height=400,
+                    hovermode='x unified',
+                    margin=dict(l=40, r=20, t=30, b=60)
                 )
                 st.plotly_chart(fig2, use_container_width=True)
             else:
