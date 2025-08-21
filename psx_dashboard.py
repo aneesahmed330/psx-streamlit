@@ -464,18 +464,18 @@ if time.time() - st.session_state['last_refresh'] > REFRESH_INTERVAL:
 
 # Status bar
 status_col1, status_col2 = st.columns([3, 1])
-with status_col1:
-    pk_tz = pytz.timezone('Asia/Karachi')
-    last_refresh_dt = datetime.fromtimestamp(st.session_state['last_refresh'], tz=pk_tz)
-    st.info(f"Auto-refresh every {REFRESH_INTERVAL//60} minutes. Last refresh: {last_refresh_dt.strftime('%Y-%m-%d %I:%M:%S %p')} (PKT)")
-with status_col2:
-    if st.button("🔄 Manual Refresh", use_container_width=True):
-        with st.spinner("Refreshing data..."):
-            fetch_and_save_all(portfolio_symbols)
-            st.session_state['last_refresh'] = time.time()
-            st.success("Data refreshed!")
-            time.sleep(1)
-            st.rerun()
+# with status_col1:
+#     pk_tz = pytz.timezone('Asia/Karachi')
+#     last_refresh_dt = datetime.fromtimestamp(st.session_state['last_refresh'], tz=pk_tz)
+#     st.info(f"Auto-refresh every {REFRESH_INTERVAL//60} minutes. Last refresh: {last_refresh_dt.strftime('%Y-%m-%d %I:%M:%S %p')} (PKT)")
+# with status_col2:
+#     if st.button("🔄 Manual Refresh", use_container_width=True):
+#         with st.spinner("Refreshing data..."):
+#             fetch_and_save_all(portfolio_symbols)
+#             st.session_state['last_refresh'] = time.time()
+#             st.success("Data refreshed!")
+#             time.sleep(1)
+#             st.rerun()
 
 # --- Portfolio Data Functions ---
 def get_latest_prices():
@@ -582,7 +582,7 @@ def calc_portfolio(prices_df, trades_df):
             last_update = None
         summary.append({
             'Symbol': symbol,
-            'Shares Held': round(net_qty, 2),
+            'Shares Held': int(round(net_qty)),
             'Avg Buy Price': round(avg_buy, 2),
             'Latest Price': round(latest_price, 2) if latest_price is not None else None,
             'Change %': latest_percentage,
@@ -673,7 +673,7 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Shares Held": st.column_config.NumberColumn(format="%.2f"),
+                "Shares Held": st.column_config.NumberColumn(format="%d"),
                 "Avg Buy Price": st.column_config.NumberColumn(format="%.2f"),
                 "Latest Price": st.column_config.NumberColumn(format="%.2f"),
                 "Market Value": st.column_config.NumberColumn(format="%.2f"),
@@ -720,13 +720,11 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                 # Performance bar chart
                 perf_df = portfolio_df[['Symbol', '% Up/Down']].copy()
                 perf_df['Color'] = perf_df['% Up/Down'].apply(lambda x: '#00E396' if x >= 0 else '#FF4560')
-                
                 fig = go.Figure(data=[go.Bar(
                     x=perf_df['Symbol'],
                     y=perf_df['% Up/Down'],
                     marker_color=perf_df['Color']
                 )])
-                
                 fig.update_layout(
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
@@ -735,28 +733,92 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     xaxis=dict(title='Symbol'),
                     height=400
                 )
-                
                 st.plotly_chart(fig, use_container_width=True)
             
-            # Additional performance metrics
+            # --- Performance Metrics Cards ---
             st.markdown("#### Performance Metrics")
             perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
-            
+            # Best Performer
+            best_row = portfolio_df.loc[portfolio_df['% Up/Down'].idxmax()] if not portfolio_df.empty else None
+            worst_row = portfolio_df.loc[portfolio_df['% Up/Down'].idxmin()] if not portfolio_df.empty else None
+            largest_row = portfolio_df.loc[portfolio_df['Market Value'].idxmax()] if not portfolio_df.empty else None
+            total_gain = total_market_value - total_investment
             with perf_col1:
-                best_performer = portfolio_df.loc[portfolio_df['% Up/Down'].idxmax()]
-                st.metric("🚀 Best Performer", best_performer['Symbol'], f"{best_performer['% Up/Down']:.2f}%")
-            
+                st.markdown(f"""
+                <div style='background: linear-gradient(135deg, #23243a 0%, #1e2130 100%); border-radius: 16px; padding: 1.2rem 1rem 1rem 1rem; box-shadow: 0 2px 16px 0 #1e88e522; border: 1.5px solid #1E88E5;'>
+                    <div style='color:#A0AEC0; font-size:1.1rem; font-weight:600; margin-bottom:0.2rem;'>🚀 Best Performer</div>
+                    <div style='font-size:2rem; font-weight:700; color:#fff;'>{best_row['Symbol'] if best_row is not None else '-'}</div>
+                    <div style='color:#00E396; font-size:1.1rem; font-weight:600; margin-top:0.2rem;'>↑ {f"{best_row['% Up/Down']:.2f}" if best_row is not None else '--'}%</div>
+                </div>""", unsafe_allow_html=True)
             with perf_col2:
-                worst_performer = portfolio_df.loc[portfolio_df['% Up/Down'].idxmin()]
-                st.metric("📉 Worst Performer", worst_performer['Symbol'], f"{worst_performer['% Up/Down']:.2f}%")
-            
+                st.markdown(f"""
+                <div style='background: linear-gradient(135deg, #23243a 0%, #1e2130 100%); border-radius: 16px; padding: 1.2rem 1rem 1rem 1rem; box-shadow: 0 2px 16px 0 #ff456022; border: 1.5px solid #FF4560;'>
+                    <div style='color:#A0AEC0; font-size:1.1rem; font-weight:600; margin-bottom:0.2rem;'>📉 Worst Performer</div>
+                    <div style='font-size:2rem; font-weight:700; color:#fff;'>{worst_row['Symbol'] if worst_row is not None else '-'}</div>
+                    <div style='color:#FF4560; font-size:1.1rem; font-weight:600; margin-top:0.2rem;'>↓ {f"{abs(worst_row['% Up/Down']):.2f}" if worst_row is not None else '--'}%</div>
+                </div>""", unsafe_allow_html=True)
             with perf_col3:
-                largest_holding = portfolio_df.loc[portfolio_df['Market Value'].idxmax()]
-                st.metric("🏆 Largest Holding", largest_holding['Symbol'], f"Rs. {largest_holding['Market Value']:,.2f}")
-            
+                st.markdown(f"""
+                <div style='background: linear-gradient(135deg, #23243a 0%, #1e2130 100%); border-radius: 16px; padding: 1.2rem 1rem 1rem 1rem; box-shadow: 0 2px 16px 0 #feb01922; border: 1.5px solid #FEB019;'>
+                    <div style='color:#A0AEC0; font-size:1.1rem; font-weight:600; margin-bottom:0.2rem;'>🏆 Largest Holding</div>
+                    <div style='font-size:2rem; font-weight:700; color:#fff;'>{largest_row['Symbol'] if largest_row is not None else '-'}</div>
+                    <div style='color:#00E396; font-size:1.1rem; font-weight:600; margin-top:0.2rem;'>Rs. {f"{largest_row['Market Value']:,.2f}" if largest_row is not None else '--'}</div>
+                </div>""", unsafe_allow_html=True)
             with perf_col4:
-                total_gain_loss = portfolio_df['Unrealized P/L'].sum()
-                st.metric("💵 Total Gain/Loss", f"Rs. {total_gain_loss:,.2f}")
+                st.markdown(f"""
+                <div style='background: linear-gradient(135deg, #23243a 0%, #1e2130 100%); border-radius: 16px; padding: 1.2rem 1rem 1rem 1rem; box-shadow: 0 2px 16px 0 #00e39622; border: 1.5px solid #00E396;'>
+                    <div style='color:#A0AEC0; font-size:1.1rem; font-weight:600; margin-bottom:0.2rem;'>💵 Total Gain/Loss</div>
+                    <div style='font-size:2rem; font-weight:700; color:#fff;'>Rs. {total_gain:,.2f}</div>
+                    <div style='color: {'#00E396' if total_gain >= 0 else '#FF4560'}; font-size:1.1rem; font-weight:600; margin-top:0.2rem;'>{'↑ Gain' if total_gain >= 0 else '↓ Loss'}</div>
+                </div>""", unsafe_allow_html=True)
+            # --- New Graph: Portfolio Value Over Time ---
+            st.markdown("#### Portfolio Value Over Time")
+            db = get_mongo()
+            # Get all price history for portfolio symbols
+            price_history = list(db.prices.find({"symbol": {"$in": portfolio_symbols}}))
+            if price_history:
+                price_hist_df = pd.DataFrame(price_history)
+                # Use errors='coerce' to handle any parsing issues and support ISO8601
+                price_hist_df['fetched_at'] = pd.to_datetime(price_hist_df['fetched_at'], errors='coerce', utc=True)
+                price_hist_df = price_hist_df.dropna(subset=['fetched_at'])
+                # Pivot to get latest price per symbol per day
+                price_hist_df['date'] = price_hist_df['fetched_at'].dt.date
+                daily_prices = price_hist_df.sort_values('fetched_at').groupby(['symbol', 'date']).last().reset_index()
+                # Get trades for net shares held per symbol per day
+                trades_df['trade_date'] = pd.to_datetime(trades_df['trade_date'])
+                trades_df['date'] = trades_df['trade_date'].dt.date
+                # Build a DataFrame with all dates in price history
+                all_dates = pd.date_range(start=daily_prices['date'].min(), end=daily_prices['date'].max())
+                portfolio_value = []
+                for d in all_dates:
+                    d = d.date()
+                    total_value = 0
+                    for symbol in portfolio_symbols:
+                        # Net shares held up to this date
+                        trades_until = trades_df[(trades_df['symbol'] == symbol) & (trades_df['date'] <= d)]
+                        qty_bought = trades_until[trades_until['trade_type'] == 'Buy']['quantity'].sum() if not trades_until.empty else 0
+                        qty_sold = trades_until[trades_until['trade_type'] == 'Sell']['quantity'].sum() if not trades_until.empty else 0
+                        net_qty = qty_bought - qty_sold
+                        # Latest price for this symbol on this date
+                        price_row = daily_prices[(daily_prices['symbol'] == symbol) & (daily_prices['date'] == d)]
+                        if not price_row.empty:
+                            price = price_row['price'].values[0]
+                            total_value += net_qty * price
+                    portfolio_value.append({'date': d, 'Portfolio Value': total_value})
+                pv_df = pd.DataFrame(portfolio_value)
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(x=pv_df['date'], y=pv_df['Portfolio Value'], mode='lines+markers', name='Portfolio Value', line=dict(color='#1E88E5', width=3)))
+                fig2.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#A0AEC0'),
+                    yaxis=dict(title='Portfolio Value (Rs.)'),
+                    xaxis=dict(title='Date'),
+                    height=350
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+            else:
+                st.info("Not enough price history to plot portfolio value over time.")
     
     with tab3:
         st.markdown("### Trade History")
@@ -825,8 +887,21 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     except:
                         pass
                     return ''
-                styled_trades = filtered_trades.style.applymap(pct_color, subset=['Percentage Change', 'P/L Amount'])
-                st.dataframe(styled_trades, use_container_width=True, hide_index=True)
+                styled_trades = filtered_trades.copy()
+                if 'quantity' in styled_trades.columns:
+                    styled_trades['quantity'] = styled_trades['quantity'].apply(lambda x: int(round(x)) if pd.notnull(x) else x)
+                if 'price' in styled_trades.columns:
+                    styled_trades['price'] = styled_trades['price'].apply(lambda x: round(x, 2) if pd.notnull(x) else x)
+                styled_trades = styled_trades.style.applymap(pct_color, subset=['Percentage Change', 'P/L Amount'])
+                st.dataframe(
+                    styled_trades,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        'quantity': st.column_config.NumberColumn(format="%d"),
+                        'price': st.column_config.NumberColumn(format="%.2f"),
+                    }
+                )
             else:
                 st.info("No trades for selected symbol.")
         else:
