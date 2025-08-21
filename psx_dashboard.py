@@ -402,6 +402,40 @@ with st.sidebar:
         else:
             st.info("Add symbols to portfolio to set alerts")
 
+# --- Alerts CRUD Functions ---
+
+def get_alerts():
+    db = get_mongo()
+    rows = list(db.alerts.find())
+    df = pd.DataFrame(rows)
+    if '_id' in df.columns:
+        df = df.drop(columns=['_id'])
+    return df
+
+def add_alert(symbol, min_price, max_price, enabled):
+    db = get_mongo()
+    db.alerts.insert_one({
+        'symbol': symbol,
+        'min_price': float(min_price),
+        'max_price': float(max_price),
+        'enabled': bool(enabled)
+    })
+
+def delete_alert(symbol, min_price, max_price):
+    db = get_mongo()
+    db.alerts.delete_one({
+        'symbol': symbol,
+        'min_price': float(min_price),
+        'max_price': float(max_price)
+    })
+
+def set_alert_enabled(symbol, min_price, max_price, enabled):
+    db = get_mongo()
+    db.alerts.update_one(
+        {'symbol': symbol, 'min_price': float(min_price), 'max_price': float(max_price)},
+        {'$set': {'enabled': bool(enabled)}}
+    )
+
 # --- Main Content Area ---
 st.title("📈 PSX Portfolio Dashboard")
 
@@ -460,6 +494,14 @@ def get_trades():
         df = df.drop(columns=['_id'])
     return df
 
+def get_alerts():
+    db = get_mongo()
+    rows = list(db.alerts.find())
+    df = pd.DataFrame(rows)
+    if '_id' in df.columns:
+        df = df.drop(columns=['_id'])
+    return df
+
 def get_trades_with_pct_change(trades_df, prices_df):
     # Add 'Percentage Change' and 'P/L Amount' columns to each trade row
     latest_price_map = dict(zip(prices_df['symbol'], prices_df['price']))
@@ -487,6 +529,7 @@ def get_trades_with_pct_change(trades_df, prices_df):
 
 prices_df = get_latest_prices()
 trades_df = get_trades()
+alerts_df = get_alerts()
 
 def calc_portfolio(prices_df, trades_df):
     summary = []
@@ -748,66 +791,54 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
     
     with tab4:
         st.markdown("### Alerts Management")
-        
-        # Mock alerts data (replace with your actual alerts logic)
-        alerts_data = [
-            {"symbol": "UBL", "min_price": 180.0, "max_price": 220.0, "enabled": True},
-            {"symbol": "HBL", "min_price": 90.0, "max_price": 120.0, "enabled": False},
-            {"symbol": "PSO", "min_price": 150.0, "max_price": 200.0, "enabled": True}
-        ]
-        
-        alerts_df = pd.DataFrame(alerts_data)
-        
+        alerts_df = get_alerts() if 'get_alerts' in globals() else pd.DataFrame()
         if not alerts_df.empty:
             st.markdown("#### Active Alerts")
-            
-            for _, alert in alerts_df.iterrows():
-                col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 1, 1])
-                
-                with col1:
-                    st.markdown(f"**{alert['symbol']}**")
-                
-                with col2:
-                    st.markdown(f"Min: Rs. {alert['min_price']:.2f}")
-                
-                with col3:
-                    st.markdown(f"Max: Rs. {alert['max_price']:.2f}")
-                
-                with col4:
-                    status = "🟢 Enabled" if alert['enabled'] else "🔴 Disabled"
-                    st.markdown(status)
-                
-                with col5:
-                    if st.button("Delete", key=f"delete_{alert['symbol']}"):
+            # Table header
+            header_cols = st.columns([2, 2, 2, 1.5, 2])
+            header_cols[0].markdown("**Symbol**")
+            header_cols[1].markdown("**Min Price**")
+            header_cols[2].markdown("**Max Price**")
+            header_cols[3].markdown("**Status**")
+            header_cols[4].markdown("**Actions**")
+            # Table rows
+            for idx, alert in alerts_df.iterrows():
+                row_cols = st.columns([2, 2, 2, 1.5, 2])
+                row_cols[0].markdown(f"<b>{alert['symbol']}</b>", unsafe_allow_html=True)
+                row_cols[1].markdown(f"Rs. {alert['min_price']:.2f}")
+                row_cols[2].markdown(f"Rs. {alert['max_price']:.2f}")
+                status_icon = "🟢" if alert['enabled'] else "🔴"
+                status_label = "Enabled" if alert['enabled'] else "Disabled"
+                status_color = "#00E396" if alert['enabled'] else "#FF4560"
+                row_cols[3].markdown(
+                    f"<span style='color:{status_color};font-weight:bold;'>{status_icon} {status_label}</span>",
+                    unsafe_allow_html=True
+                )
+                toggle_label = "Disable" if alert['enabled'] else "Enable"
+                with row_cols[4]:
+                    tcol1, tcol2 = st.columns([1, 1])
+                    if tcol1.button(toggle_label, key=f"toggle_{idx}"):
+                        set_alert_enabled(alert['symbol'], alert['min_price'], alert['max_price'], not alert['enabled'])
+                        st.rerun()
+                    if tcol2.button("Delete", key=f"delete_{idx}"):
+                        delete_alert(alert['symbol'], alert['min_price'], alert['max_price'])
                         st.success(f"Alert for {alert['symbol']} deleted")
-                        # Add your delete logic here
-            
-            st.markdown("---")
-        
+                        st.rerun()
+            st.markdown("<hr style='margin:0.5em 0 0.5em 0; border:0; border-top:1px solid #222;'>", unsafe_allow_html=True)
+        else:
+            st.info("No alerts set. Use the form below to create one.")
+        st.markdown("---")
         st.markdown("#### Create New Alert")
-        
         with st.form("new_alert_form"):
             alert_col1, alert_col2, alert_col3 = st.columns(3)
-            
             with alert_col1:
                 new_alert_symbol = st.selectbox("Symbol", portfolio_symbols, key="new_alert_symbol")
-            
             with alert_col2:
                 new_min_price = st.number_input("Min Price", min_value=0.0, step=1.0, key="new_min_price")
-            
             with alert_col3:
                 new_max_price = st.number_input("Max Price", min_value=0.0, step=1.0, key="new_max_price")
-            
             new_alert_enabled = st.checkbox("Enabled", value=True, key="new_alert_enabled")
-            
             if st.form_submit_button("💾 Create Alert", use_container_width=True):
+                add_alert(new_alert_symbol, new_min_price, new_max_price, new_alert_enabled)
                 st.success(f"Alert created for {new_alert_symbol}")
-                # Add your alert creation logic here
-
-else:
-    st.info("Your portfolio is empty. Add symbols to get started.")
-
-# Footer
-st.markdown("---")
-st.markdown("<div style='text-align: center; color: #A0AEC0;'>PSX Portfolio Dashboard • Made with Streamlit</div>", 
-            unsafe_allow_html=True)
+                st.rerun()
