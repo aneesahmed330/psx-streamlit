@@ -107,17 +107,16 @@ def fetch_price(symbol):
 
 def save_price(symbol, price, change_value, percentage, direction):
     db = get_mongo()
-    db.prices.update_one(
-        {'symbol': symbol},
-        {'$set': {
-            'price': price,
-            'change_value': change_value,
-            'percentage': percentage,
-            'direction': direction,
-            'fetched_at': datetime.now().isoformat()
-        }},
-        upsert=True
-    )
+    pkt_tz = pytz.timezone('Asia/Karachi')
+    fetched_at = datetime.now(pkt_tz).isoformat()
+    db.prices.insert_one({
+        'symbol': symbol,
+        'price': price,
+        'change_value': change_value,
+        'percentage': percentage,
+        'direction': direction,
+        'fetched_at': fetched_at
+    })
 
 def fetch_and_save_symbol(symbol):
     try:
