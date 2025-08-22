@@ -848,6 +848,67 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     margin=dict(l=40, r=20, t=30, b=60)
                 )
                 st.plotly_chart(fig2, use_container_width=True)
+                # --- Normalized Price Trend Chart ---
+                st.markdown("#### Normalized Price Trend (Compare Symbols)")
+                # Multi-select for symbols (default: all)
+                norm_symbols = st.multiselect(
+                    "Select Symbols to Compare",
+                    options=portfolio_symbols,
+                    default=portfolio_symbols,
+                    key="norm_price_symbols"
+                )
+                # --- Date Range Filter for Normalized Price Chart ---
+                norm_price_df = price_hist_df[price_hist_df['symbol'].isin(norm_symbols)].copy()
+                pk_tz = pytz.timezone('Asia/Karachi')
+                norm_price_df['fetched_at_pkt'] = norm_price_df['fetched_at'].dt.tz_convert(pk_tz)
+                if not norm_price_df.empty:
+                    min_norm_date = norm_price_df['fetched_at_pkt'].min().date()
+                    max_norm_date = norm_price_df['fetched_at_pkt'].max().date()
+                    norm_date_range = st.date_input(
+                        "Select Date Range for Price Trend",
+                        value=(min_norm_date, max_norm_date),
+                        min_value=min_norm_date,
+                        max_value=max_norm_date,
+                        key="norm_price_date_range"
+                    )
+                    if norm_date_range and isinstance(norm_date_range, tuple) and len(norm_date_range) == 2:
+                        norm_start, norm_end = norm_date_range
+                        norm_price_df = norm_price_df[(norm_price_df['fetched_at_pkt'].dt.date >= norm_start) & (norm_price_df['fetched_at_pkt'].dt.date <= norm_end)]
+                # --- Vectorized Normalization ---
+                def normalize_group(df):
+                    if df.empty:
+                        return df
+                    first_price = df.iloc[0]['price']
+                    df = df.assign(norm_price=df['price'] / first_price if first_price else None)
+                    return df
+                norm_price_df = norm_price_df.sort_values(['symbol', 'fetched_at_pkt'])
+                norm_price_df = norm_price_df.groupby('symbol', group_keys=False).apply(normalize_group)
+                # --- Plotly Chart ---
+                fig_norm = go.Figure()
+                for symbol in norm_symbols:
+                    sym_df = norm_price_df[norm_price_df['symbol'] == symbol]
+                    if not sym_df.empty:
+                        fig_norm.add_trace(go.Scatter(
+                            x=sym_df['fetched_at_pkt'],
+                            y=sym_df['norm_price'],
+                            mode='lines+markers',
+                            name=symbol,
+                            line=dict(width=2),
+                            marker=dict(size=6, opacity=0.8),
+                            hovertemplate='<b>%{text}</b><br>Date/Time: %{x|%b %d, %Y %I:%M %p}<br>Norm. Price: %{y:.2f}<extra></extra>',
+                            text=[symbol]*len(sym_df)
+                        ))
+                fig_norm.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='#A0AEC0'),
+                    yaxis=dict(title='Normalized Price (Start=1.0)', tickformat='.2f'),
+                    xaxis=dict(title='Date/Time (PKT)', tickangle=30, showgrid=True, tickformat='%b %d\n%I:%M %p'),
+                    height=400,
+                    hovermode='x unified',
+                    margin=dict(l=40, r=20, t=30, b=60)
+                )
+                st.plotly_chart(fig_norm, use_container_width=True)
             else:
                 st.info("Not enough price history to plot portfolio value over time.")
     
