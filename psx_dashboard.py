@@ -850,17 +850,20 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                 st.plotly_chart(fig2, use_container_width=True)
                 # --- Normalized Price Trend Chart ---
                 st.markdown("#### Normalized Price Trend (Compare Symbols)")
-                # Multi-select for symbols (default: all)
                 norm_symbols = st.multiselect(
                     "Select Symbols to Compare",
                     options=portfolio_symbols,
                     default=portfolio_symbols,
                     key="norm_price_symbols"
                 )
-                # --- Date Range Filter for Normalized Price Chart ---
                 norm_price_df = price_hist_df[price_hist_df['symbol'].isin(norm_symbols)].copy()
                 pk_tz = pytz.timezone('Asia/Karachi')
                 norm_price_df['fetched_at_pkt'] = norm_price_df['fetched_at'].dt.tz_convert(pk_tz)
+                # Filter for trading hours (8:00 to 16:00 PKT)
+                norm_price_df = norm_price_df[
+                    (norm_price_df['fetched_at_pkt'].dt.time >= pd.to_datetime('08:00').time()) &
+                    (norm_price_df['fetched_at_pkt'].dt.time <= pd.to_datetime('16:00').time())
+                ]
                 if not norm_price_df.empty:
                     min_norm_date = norm_price_df['fetched_at_pkt'].min().date()
                     max_norm_date = norm_price_df['fetched_at_pkt'].max().date()
@@ -874,7 +877,6 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     if norm_date_range and isinstance(norm_date_range, tuple) and len(norm_date_range) == 2:
                         norm_start, norm_end = norm_date_range
                         norm_price_df = norm_price_df[(norm_price_df['fetched_at_pkt'].dt.date >= norm_start) & (norm_price_df['fetched_at_pkt'].dt.date <= norm_end)]
-                # --- Vectorized Normalization ---
                 def normalize_group(df):
                     if df.empty:
                         return df
@@ -883,28 +885,45 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     return df
                 norm_price_df = norm_price_df.sort_values(['symbol', 'fetched_at_pkt'])
                 norm_price_df = norm_price_df.groupby('symbol', group_keys=False).apply(normalize_group)
-                # --- Plotly Chart ---
+                # --- Use trading slot index as x-axis to remove non-trading hour gaps ---
                 fig_norm = go.Figure()
                 for symbol in norm_symbols:
-                    sym_df = norm_price_df[norm_price_df['symbol'] == symbol]
+                    sym_df = norm_price_df[norm_price_df['symbol'] == symbol].sort_values('fetched_at_pkt').copy()
                     if not sym_df.empty:
+                        # Assign trading slot index (continuous integer for each trading timestamp)
+                        sym_df = sym_df.reset_index(drop=True)
+                        sym_df['slot_idx'] = range(len(sym_df))
                         fig_norm.add_trace(go.Scatter(
-                            x=sym_df['fetched_at_pkt'],
+                            x=sym_df['slot_idx'],
                             y=sym_df['norm_price'],
                             mode='lines+markers',
                             name=symbol,
                             line=dict(width=2),
                             marker=dict(size=6, opacity=0.8),
-                            hovertemplate='<b>%{text}</b><br>Date/Time: %{x|%b %d, %Y %I:%M %p}<br>Norm. Price: %{y:.2f}<extra></extra>',
-                            text=[symbol]*len(sym_df)
+                            # Show real datetime in hover
+                            hovertemplate=f'<b>{symbol}</b><br>Date/Time: %{{customdata|%b %d %H:%M}}<br>Norm. Price: %{{y:.2f}}<extra></extra>',
+                            customdata=sym_df['fetched_at_pkt']
                         ))
+                # Build custom tickvals and ticktext for x-axis (show only a few for clarity)
+                all_slots = norm_price_df.sort_values('fetched_at_pkt').reset_index(drop=True)
+                all_slots['slot_idx'] = range(len(all_slots))
+                tick_step = max(1, len(all_slots) // 10)
+                tickvals = all_slots['slot_idx'][::tick_step].tolist()
+                ticktext = all_slots['fetched_at_pkt'][::tick_step].dt.strftime('%b %d\n%H:%M').tolist()
                 fig_norm.update_layout(
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
                     font=dict(color='#A0AEC0'),
                     yaxis=dict(title='Normalized Price (Start=1.0)', tickformat='.2f'),
-                    xaxis=dict(title='Date/Time (PKT)', tickangle=30, showgrid=True, tickformat='%b %d\n%I:%M %p'),
-                    height=400,
+                    xaxis=dict(
+                        title='Date/Time (8am–4pm, trading hours only)',
+                        tickmode='array',
+                        tickvals=tickvals,
+                        ticktext=ticktext,
+                        tickangle=30,
+                        showgrid=True
+                    ),
+                    height=650,
                     hovermode='x unified',
                     margin=dict(l=40, r=20, t=30, b=60)
                 )
