@@ -26,6 +26,57 @@ load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME")
 
+# --- Alerts CRUD Functions ---
+
+def get_alerts():
+    db = get_mongo()
+    rows = list(db.alerts.find())
+    df = pd.DataFrame(rows)
+    if '_id' in df.columns:
+        df = df.drop(columns=['_id'])
+    return df
+
+def add_alert(symbol, min_price, max_price, enabled):
+    db = get_mongo()
+    db.alerts.insert_one({
+        'symbol': symbol,
+        'min_price': float(min_price),
+        'max_price': float(max_price),
+        'enabled': bool(enabled)
+    })
+
+def delete_alert(symbol, min_price, max_price):
+    db = get_mongo()
+    db.alerts.delete_one({
+        'symbol': symbol,
+        'min_price': float(min_price),
+        'max_price': float(max_price)
+    })
+
+def set_alert_enabled(symbol, min_price, max_price, enabled):
+    db = get_mongo()
+    db.alerts.update_one(
+        {'symbol': symbol, 'min_price': float(min_price), 'max_price': float(max_price)},
+        {'$set': {'enabled': bool(enabled)}}
+    )
+
+# --- Stocks Collection CRUD Functions ---
+def get_stocks():
+    db = get_mongo()
+    rows = list(db.stocks.find())
+    df = pd.DataFrame(rows)
+    if '_id' in df.columns:
+        df = df.drop(columns=['_id'])
+    return df
+
+def add_stock(symbol):
+    db = get_mongo()
+    db.stocks.update_one({'symbol': symbol.upper()}, {'$set': {'symbol': symbol.upper()}}, upsert=True)
+
+def delete_stock(symbol):
+    db = get_mongo()
+    db.stocks.delete_one({'symbol': symbol.upper()})
+
 # Custom CSS for professional styling with enhanced tabs
 st.markdown("""
 <style>
@@ -394,7 +445,7 @@ with st.sidebar:
                     'notes': trade_notes
                 })
                 st.success("Trade logged successfully!")
-                st.experimental_rerun()
+                st.rerun()
     
     # Alerts Management Section
     with st.expander("🔔 Price Alerts", expanded=True):
@@ -412,46 +463,57 @@ with st.sidebar:
             if st.button("💾 Save Alert", use_container_width=True):
                 add_alert(alert_symbol, min_price, max_price, enabled)
                 st.success(f"Alert set for {alert_symbol}.")
-                st.experimental_rerun()
+                st.rerun()
         else:
             st.info("Add trades to see symbols for alerts")
+    
+    # --- Stocks Management Section ---
+    with st.expander("🏦 Manage Stock Symbols", expanded=False):
+        stocks_df = get_stocks()
+        stock_symbols = stocks_df['symbol'].tolist() if not stocks_df.empty else []
+        # Remove symbol UI
+        if stock_symbols:
+            remove_col1, remove_col2 = st.columns([3,1])
+            with remove_col1:
+                symbol_to_remove = st.selectbox("Select Symbol to Remove", stock_symbols, key="remove_stock_select")
+            with remove_col2:
+                st.markdown("<div style='height:1.7em'></div>", unsafe_allow_html=True)
+                if st.button("❌", key="remove_stock_btn", use_container_width=True):
+                    if symbol_to_remove:
+                        delete_stock(symbol_to_remove)
+                        st.success(f"Removed symbol: {symbol_to_remove}")
+                        st.rerun()
+        else:
+            st.info("No stocks added yet.")
+        # Add symbol UI
+        with st.form("add_stock_form"):
+            new_stock = st.text_input("Add New Symbol", max_chars=10, key="add_stock_input")
+            if st.form_submit_button("➕ Add Symbol", use_container_width=True):
+                if new_stock:
+                    add_stock(new_stock)
+                    st.success(f"Added symbol: {new_stock.upper()}")
+                    st.rerun()
 
-# --- Alerts CRUD Functions ---
-
-def get_alerts():
+# --- Optimized Data Fetching with Caching ---
+@st.cache_data(ttl=300, show_spinner=False)
+def get_price_history_df(symbols):
     db = get_mongo()
-    rows = list(db.alerts.find())
-    df = pd.DataFrame(rows)
-    if '_id' in df.columns:
-        df = df.drop(columns=['_id'])
-    return df
+    price_history = list(db.prices.find({"symbol": {"$in": symbols}}))
+    return pd.DataFrame(price_history)
 
-def add_alert(symbol, min_price, max_price, enabled):
+@st.cache_data(ttl=300, show_spinner=False)
+def get_trades_df():
     db = get_mongo()
-    db.alerts.insert_one({
-        'symbol': symbol,
-        'min_price': float(min_price),
-        'max_price': float(max_price),
-        'enabled': bool(enabled)
-    })
-
-def delete_alert(symbol, min_price, max_price):
-    db = get_mongo()
-    db.alerts.delete_one({
-        'symbol': symbol,
-        'min_price': float(min_price),
-        'max_price': float(max_price)
-    })
-
-def set_alert_enabled(symbol, min_price, max_price, enabled):
-    db = get_mongo()
-    db.alerts.update_one(
-        {'symbol': symbol, 'min_price': float(min_price), 'max_price': float(max_price)},
-        {'$set': {'enabled': bool(enabled)}}
-    )
+    trades = list(db.trades.find())
+    return pd.DataFrame(trades)
 
 # --- Main Content Area ---
 st.title("📈 PSX Portfolio Dashboard")
+
+# Fetch all data ONCE, filter in-memory for charts
+price_hist_df = get_price_history_df(portfolio_symbols)
+trades_df = get_trades_df()
+alerts_df = get_alerts()
 
 # Auto-refresh every 60 seconds
 REFRESH_INTERVAL = 300
@@ -461,7 +523,7 @@ if 'last_refresh' not in st.session_state:
 if time.time() - st.session_state['last_refresh'] > REFRESH_INTERVAL:
     fetch_and_save_all(portfolio_symbols)
     st.session_state['last_refresh'] = time.time()
-    st.experimental_rerun()
+    st.rerun()
 
 # Status bar
 status_col1, status_col2 = st.columns([3, 1])
@@ -788,29 +850,27 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                 price_hist_df['fetched_at'] = pd.to_datetime(price_hist_df['fetched_at'], errors='coerce', utc=True)
                 price_hist_df = price_hist_df.dropna(subset=['fetched_at'])
                 price_hist_df = price_hist_df.sort_values('fetched_at')
-                # Get all unique timestamps (sorted)
-                all_times = sorted(price_hist_df['fetched_at'].unique())
-                # Ensure trade_date is always timezone-aware (UTC)
                 trades_df['trade_date'] = pd.to_datetime(trades_df['trade_date'], errors='coerce', utc=True)
-                portfolio_value = []
+                # Build a DataFrame of all unique timestamps
+                all_times = price_hist_df['fetched_at'].sort_values().unique()
                 pk_tz = pytz.timezone('Asia/Karachi')
+                # Precompute net shares for each symbol at each timestamp (vectorized)
+                portfolio_value = []
                 for t in all_times:
-                    total_value = 0
-                    for symbol in portfolio_symbols:
-                        # Net shares held up to this timestamp
-                        trades_until = trades_df[(trades_df['symbol'] == symbol) & (trades_df['trade_date'] <= t)]
-                        qty_bought = trades_until[trades_until['trade_type'] == 'Buy']['quantity'].sum() if not trades_until.empty else 0
-                        qty_sold = trades_until[trades_until['trade_type'] == 'Sell']['quantity'].sum() if not trades_until.empty else 0
-                        net_qty = qty_bought - qty_sold
-                        # Latest price for this symbol up to this timestamp (not just at t)
-                        price_row = price_hist_df[(price_hist_df['symbol'] == symbol) & (price_hist_df['fetched_at'] <= t)]
-                        if not price_row.empty and net_qty > 0:
-                            # Get the most recent price up to t
-                            last_price = price_row.iloc[-1]['price']
-                            total_value += net_qty * last_price
-                    # Convert UTC timestamp to PKT for display
-                    t_pkt = t.tz_convert(pk_tz)
-                    portfolio_value.append({'timestamp': t_pkt, 'Portfolio Value': total_value})
+                    # For each symbol, get net shares held up to t
+                    mask = (trades_df['trade_date'] <= t)
+                    trades_until = trades_df[mask]
+                    if trades_until.empty:
+                        portfolio_value.append({'timestamp': t.tz_convert(pk_tz), 'Portfolio Value': 0})
+                        continue
+                    net_qty = trades_until.groupby(['symbol', 'trade_type'])['quantity'].sum().unstack(fill_value=0)
+                    net_qty['net'] = net_qty.get('Buy', 0) - net_qty.get('Sell', 0)
+                    # For each symbol, get latest price up to t
+                    latest_prices = price_hist_df[price_hist_df['fetched_at'] <= t].sort_values('fetched_at').groupby('symbol').tail(1)
+                    merged = net_qty[['net']].merge(latest_prices[['symbol', 'price']], left_index=True, right_on='symbol', how='left')
+                    merged['value'] = merged['net'] * merged['price']
+                    total_value = merged['value'].sum()
+                    portfolio_value.append({'timestamp': t.tz_convert(pk_tz), 'Portfolio Value': total_value})
                 pv_df = pd.DataFrame(portfolio_value)
                 # --- Date Range Filter for Portfolio Value Over Time ---
                 if not pv_df.empty:
@@ -848,7 +908,7 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     margin=dict(l=40, r=20, t=30, b=60)
                 )
                 st.plotly_chart(fig2, use_container_width=True)
-                # --- Normalized Price Trend Chart ---
+                # --- Normalized Price Trend Chart (Optimized) ---
                 st.markdown("#### Normalized Price Trend (Compare Symbols)")
                 norm_symbols = st.multiselect(
                     "Select Symbols to Compare",
@@ -857,7 +917,6 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     key="norm_price_symbols"
                 )
                 norm_price_df = price_hist_df[price_hist_df['symbol'].isin(norm_symbols)].copy()
-                pk_tz = pytz.timezone('Asia/Karachi')
                 norm_price_df['fetched_at_pkt'] = norm_price_df['fetched_at'].dt.tz_convert(pk_tz)
                 # Filter for trading hours (8:00 to 16:00 PKT)
                 norm_price_df = norm_price_df[
@@ -890,7 +949,6 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                 for symbol in norm_symbols:
                     sym_df = norm_price_df[norm_price_df['symbol'] == symbol].sort_values('fetched_at_pkt').copy()
                     if not sym_df.empty:
-                        # Assign trading slot index (continuous integer for each trading timestamp)
                         sym_df = sym_df.reset_index(drop=True)
                         sym_df['slot_idx'] = range(len(sym_df))
                         fig_norm.add_trace(go.Scatter(
@@ -900,11 +958,9 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                             name=symbol,
                             line=dict(width=2),
                             marker=dict(size=6, opacity=0.8),
-                            # Show real datetime in hover
                             hovertemplate=f'<b>{symbol}</b><br>Date/Time: %{{customdata|%b %d %H:%M}}<br>Norm. Price: %{{y:.2f}}<extra></extra>',
                             customdata=sym_df['fetched_at_pkt']
                         ))
-                # Build custom tickvals and ticktext for x-axis (show only a few for clarity)
                 all_slots = norm_price_df.sort_values('fetched_at_pkt').reset_index(drop=True)
                 all_slots['slot_idx'] = range(len(all_slots))
                 tick_step = max(1, len(all_slots) // 10)
