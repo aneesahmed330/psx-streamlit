@@ -71,7 +71,16 @@ def get_stocks():
 
 def add_stock(symbol):
     db = get_mongo()
-    db.stocks.update_one({'symbol': symbol.upper()}, {'$set': {'symbol': symbol.upper()}}, upsert=True)
+    db.stocks.update_one(
+        {'symbol': symbol.upper()},
+        {'$set': {
+            'symbol': symbol.upper(),
+            'payouts': [],
+            'financials': {'annual': [], 'quarterly': []},
+            'ratios': []
+        }},
+        upsert=True
+    )
 
 def delete_stock(symbol):
     db = get_mongo()
@@ -399,6 +408,30 @@ def get_portfolio_symbols_from_trades():
 # Get portfolio symbols from trades only
 portfolio_symbols = get_portfolio_symbols_from_trades()
 
+# --- Functions to fetch and save company info ---
+def fetch_and_save_company_info(symbol):
+    """Fetch payouts, financials, ratios for a symbol and update the stocks collection."""
+    from dev_work.test import fetch_payouts_json, fetch_financials_tidy_json, fetch_ratios_tidy_json
+    payouts = fetch_payouts_json(symbol)
+    financials = fetch_financials_tidy_json(symbol)
+    ratios = fetch_ratios_tidy_json(symbol)
+    db = get_mongo()
+    db.stocks.update_one(
+        {'symbol': symbol.upper()},
+        {'$set': {
+            'payouts': payouts,
+            'financials': financials,
+            'ratios': ratios
+        }}
+    )
+
+def fetch_and_save_all_company_info(symbols):
+    for symbol in symbols:
+        try:
+            fetch_and_save_company_info(symbol)
+        except Exception as e:
+            st.warning(f"Error fetching company info for {symbol}: {e}")
+
 # --- Sidebar: Portfolio Management, Price Actions, Log Trade, Alerts ---
 with st.sidebar:
     st.sidebar.markdown("""
@@ -415,6 +448,14 @@ with st.sidebar:
             with st.spinner("Fetching prices..."):
                 fetch_and_save_all(portfolio_symbols)
                 st.success("Prices updated successfully!")
+        # New button for company info
+        if st.button("🏢 Fetch Company Info", use_container_width=True,
+                    help="Fetch payouts, financials, ratios for all stocks"):
+            stocks_df = get_stocks()
+            stock_symbols = stocks_df['symbol'].tolist() if not stocks_df.empty else []
+            with st.spinner("Fetching company info for all stocks..."):
+                fetch_and_save_all_company_info(stock_symbols)
+                st.success("Company info updated for all stocks!")
     
     # Trade Logging Section
     with st.expander("📝 Log Trade", expanded=True):
