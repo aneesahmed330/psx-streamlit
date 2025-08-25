@@ -138,8 +138,22 @@ def fetch_and_save_all():
         return
     
     db = get_mongo()
-    symbols = db.portfolio.find({}, {"_id": 0, "symbol": 1})
-    tickers = [doc["symbol"] for doc in symbols]
+    # Get symbols from both trades (actual portfolio) and stocks (for analytics)
+    trades_symbols = list(db.trades.distinct("symbol"))
+    stocks_symbols = list(db.stocks.distinct("symbol"))
+    
+    # Combine and deduplicate
+    all_symbols = list(set(trades_symbols + stocks_symbols))
+    
+    if not all_symbols:
+        print("No symbols found in trades or stocks collections. Add some trades/stocks first.")
+        return
+    
+    print(f"Found {len(trades_symbols)} symbols from trades: {trades_symbols}")
+    print(f"Found {len(stocks_symbols)} symbols from stocks: {stocks_symbols}")
+    print(f"Total {len(all_symbols)} unique symbols to fetch: {all_symbols}")
+    
+    tickers = all_symbols
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         executor.map(fetch_and_save_symbol, tickers)
 

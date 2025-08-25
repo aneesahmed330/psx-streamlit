@@ -15,6 +15,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 import concurrent.futures
+import plotly.express as px
 
 
 # helper functions
@@ -111,6 +112,10 @@ def add_stock(symbol):
 def delete_stock(symbol):
     db = get_mongo()
     db.stocks.delete_one({'symbol': symbol.upper()})
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_stocks_df():
+    return get_stocks()
 
 # Custom CSS for professional styling with enhanced tabs
 st.markdown("""
@@ -328,7 +333,11 @@ def init_db():
 def fetch_price(symbol):
     url = f"https://dps.psx.com.pk/company/{symbol}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Connection': 'keep-alive',
+        'Referer': 'https://www.google.com/'
     }
     response = requests.get(url, headers=headers, timeout=10)
     response.raise_for_status()
@@ -377,13 +386,40 @@ def save_price(symbol, price, change_value, percentage, direction):
     })
 
 def fetch_and_save_all(tickers):
-    for symbol in tickers:
+    """Fetch prices for all tickers in parallel using threads for speed."""
+    def fetch_and_save_single(symbol):
         try:
             price, change_value, percentage, direction = fetch_price(symbol)
             if price is not None:
                 save_price(symbol, price, change_value, percentage, direction)
+                return (symbol, "success", price)
+            else:
+                return (symbol, "no_price", None)
         except Exception as e:
-            st.warning(f"Error fetching {symbol}: {e}")
+            return (symbol, "error", str(e))
+    
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_symbol = {executor.submit(fetch_and_save_single, symbol): symbol for symbol in tickers}
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as exc:
+                results.append((symbol, "exception", str(exc)))
+    
+    # Show results summary
+    success_count = len([r for r in results if r[1] == "success"])
+    error_count = len([r for r in results if r[1] in ["error", "exception", "no_price"]])
+    
+    if success_count > 0:
+        st.success(f"✅ Successfully updated {success_count}/{len(tickers)} prices")
+    if error_count > 0:
+        errors = [f"{r[0]}: {r[2]}" for r in results if r[1] in ["error", "exception", "no_price"]]
+        st.warning(f"⚠️ {error_count} errors occurred:\n" + "\n".join(errors[:3]) + ("..." if len(errors) > 3 else ""))
+    
+    return results
 
 # --- Login Logic ---
 def show_login():
@@ -459,16 +495,27 @@ def fetch_and_save_all_company_info(symbols):
             return (symbol, None)
         except Exception as e:
             return (symbol, str(e))
+    
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    # Increase workers for faster parallel processing
+    max_workers = min(16, len(symbols))  # Use up to 16 workers, but not more than symbols
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks at once for better efficiency
         future_to_symbol = {executor.submit(fetch_and_save, symbol): symbol for symbol in symbols}
+        
+        # Collect results as they complete
         for future in concurrent.futures.as_completed(future_to_symbol):
-            symbol = future_to_symbol[future]
             try:
-                res = future.result()
-                results.append(res)
+                result = future.result(timeout=30)  # 30 second timeout per symbol
+                results.append(result)
+            except concurrent.futures.TimeoutError:
+                symbol = future_to_symbol[future]
+                results.append((symbol, "Timeout - took longer than 30 seconds"))
             except Exception as exc:
+                symbol = future_to_symbol[future]
                 results.append((symbol, str(exc)))
+    
     get_cached_stocks_df.clear()
     return results
 
@@ -484,22 +531,76 @@ with st.sidebar:
     # Price Actions Section
     with st.expander("🔄 Price Actions", expanded=False):
         if st.button("💹 Fetch Latest Prices", use_container_width=True,
-                    help="Fetch latest prices for all symbols"):
+                    help="Fetch latest prices for all symbols (portfolio + stocks)"):
             with st.spinner("Fetching prices..."):
-                fetch_and_save_all(portfolio_symbols)
-                st.success("Prices updated successfully!")
+                # Get symbols from both portfolio (trades) and stocks collection
+                stocks_df = get_stocks()
+                stock_symbols = stocks_df['symbol'].tolist() if not stocks_df.empty else []
+                
+                # Combine and deduplicate
+                all_symbols = list(set(portfolio_symbols + stock_symbols))
+                
+                if all_symbols:
+                    duplicates_removed = len(portfolio_symbols) + len(stock_symbols) - len(all_symbols)
+                    st.info(f"Fetching prices for {len(portfolio_symbols)} portfolio + {len(stock_symbols)} analytics symbols = {len(all_symbols)} unique symbols" + 
+                           (f" ({duplicates_removed} duplicates removed)" if duplicates_removed > 0 else ""))
+                    
+                    # Time the operation
+                    import time
+                    start_time = time.time()
+                    fetch_and_save_all(all_symbols)
+                    end_time = time.time()
+                    
+                    # Calculate and display timing
+                    elapsed = end_time - start_time
+                    if elapsed < 1:
+                        time_str = f"{elapsed*1000:.0f}ms"
+                    elif elapsed < 60:
+                        time_str = f"{elapsed:.1f}s"
+                    else:
+                        time_str = f"{elapsed/60:.1f}min"
+                    
+                    st.success(f"⚡ Completed in {time_str} using parallel fetching!")
+                else:
+                    st.warning("No symbols found to fetch prices for. Add some trades or stocks first.")
         # New button for company info
         if st.button("🏢 Fetch Company Info", use_container_width=True,
                     help="Fetch payouts, financials, ratios for all stocks (parallel fetching for speed)"):
-            stocks_df = get_stocks()
+            stocks_df = get_cached_stocks_df()
             stock_symbols = stocks_df['symbol'].tolist() if not stocks_df.empty else []
-            with st.spinner("Fetching company info for all stocks (parallel)..."):
-                results = fetch_and_save_all_company_info(stock_symbols)
-                errors = [f"{s}: {e}" for s, e in results if e]
-                if errors:
-                    st.warning("Some errors occurred:\n" + "\n".join(errors))
-                else:
-                    st.success("Company info updated for all stocks!")
+            
+            if stock_symbols:
+                st.info(f"Fetching company info for {len(stock_symbols)} stocks...")
+                
+                with st.spinner("Fetching company info for all stocks (parallel)..."):
+                    # Time the operation
+                    import time
+                    start_time = time.time()
+                    results = fetch_and_save_all_company_info(stock_symbols)
+                    end_time = time.time()
+                    
+                    # Calculate timing
+                    elapsed = end_time - start_time
+                    if elapsed < 1:
+                        time_str = f"{elapsed*1000:.0f}ms"
+                    elif elapsed < 60:
+                        time_str = f"{elapsed:.1f}s"
+                    else:
+                        time_str = f"{elapsed/60:.1f}min"
+                    
+                    # Show results
+                    errors = [f"{s}: {e}" for s, e in results if e]
+                    success_count = len([r for r in results if not r[1]])
+                    
+                    if errors:
+                        st.warning(f"⚠️ {len(errors)} errors occurred:\n" + "\n".join(errors[:3]) + ("..." if len(errors) > 3 else ""))
+                    
+                    if success_count > 0:
+                        st.success(f"✅ Successfully updated company info for {success_count}/{len(stock_symbols)} stocks")
+                    
+                    st.success(f"⚡ Completed in {time_str} using parallel fetching!")
+            else:
+                st.warning("No stocks found. Add some stocks first in 'Manage Stock Symbols' section.")
     
     # Trade Logging Section
     with st.expander("📝 Log Trade", expanded=False):
@@ -591,10 +692,6 @@ def get_trades_df():
     db = get_mongo()
     trades = list(db.trades.find())
     return pd.DataFrame(trades)
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_cached_stocks_df():
-    return get_stocks()
 
 # --- Main Content Area ---
 st.title("📈 PSX Portfolio Dashboard")
@@ -1176,6 +1273,191 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                 st.info("No trades for selected symbol.")
         else:
             st.info("No trade history available.")
+
+        # --- Professional Analytics Dropdown ---
+        st.markdown("---")
+        st.markdown("### 📊 Trade Analytics")
+
+        # Helper: Ensure P/L Amount column exists and is numeric
+        def ensure_pl_amount(df, prices_df=None):
+            if 'P/L Amount' not in df.columns:
+                # Use get_trades_with_pct_change if available
+                if prices_df is not None:
+                    try:
+                        df = get_trades_with_pct_change(df, prices_df)
+                    except Exception:
+                        df['P/L Amount'] = 0.0
+                else:
+                    df['P/L Amount'] = 0.0
+            # Ensure numeric
+            df['P/L Amount'] = pd.to_numeric(df['P/L Amount'], errors='coerce').fillna(0.0)
+            return df
+
+        # Date filter for analytics
+        analytics_min_date = trades_df['trade_date'].min() if not trades_df.empty else None
+        analytics_max_date = trades_df['trade_date'].max() if not trades_df.empty else None
+        analytics_date_range = None
+        if analytics_min_date and analytics_max_date:
+            analytics_min_date_obj = pd.to_datetime(analytics_min_date).date()
+            analytics_max_date_obj = pd.to_datetime(analytics_max_date).date()
+            analytics_date_range = st.date_input(
+                "Filter Analytics by Date Range",
+                value=(analytics_min_date_obj, analytics_max_date_obj),
+                min_value=analytics_min_date_obj,
+                max_value=analytics_max_date_obj,
+                key="analytics_date_range"
+            )
+        # Filter trades_df for analytics
+        filtered_trades = trades_df.copy()
+        if analytics_date_range and isinstance(analytics_date_range, tuple) and len(analytics_date_range) == 2:
+            start_date, end_date = analytics_date_range
+            filtered_trades = filtered_trades[(pd.to_datetime(filtered_trades['trade_date']).dt.date >= start_date) & (pd.to_datetime(filtered_trades['trade_date']).dt.date <= end_date)]
+        # Ensure P/L Amount is present and numeric
+        filtered_trades = ensure_pl_amount(filtered_trades, prices_df if 'prices_df' in globals() else None)
+
+        analytics_options = [
+            "Monthly Investment per Symbol",
+            "Monthly Buy/Sell Volume",
+            "Cumulative Investment vs. P/L",
+            "Win Rate & Average Return",
+"Portfolio Allocation by Investment"
+        ]
+        selected_analytics = st.selectbox("Select Analytics to View", analytics_options, key="trade_analytics_select")
+
+        import plotly.express as px
+        import plotly.graph_objects as go
+        import numpy as np
+
+        if selected_analytics == "Monthly Investment per Symbol":
+            st.markdown("Shows how much you invested in each symbol per month. Helps spot concentration and diversification.")
+            if not filtered_trades.empty:
+                filtered_trades['trade_date'] = pd.to_datetime(filtered_trades['trade_date'], errors='coerce')
+                filtered_trades['month'] = filtered_trades['trade_date'].dt.to_period('M').astype(str)
+                monthly_invest = filtered_trades[filtered_trades['trade_type'] == 'Buy'].groupby(['month', 'symbol']).apply(
+                    lambda x: (x['quantity'] * x['price']).sum()).reset_index(name='Invested')
+                fig = px.bar(monthly_invest, x='month', y='Invested', color='symbol', barmode='group',
+                             title='Monthly Investment per Symbol')
+                fig.update_layout(xaxis_title='Month', yaxis_title='Invested Amount (Rs.)', height=400,
+                                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A0AEC0'))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data for selected date range.")
+
+        elif selected_analytics == "Monthly Buy/Sell Volume":
+            st.markdown("Shows the number of shares bought and sold per symbol each month. Helps visualize trading activity.")
+            if not filtered_trades.empty:
+                filtered_trades['trade_date'] = pd.to_datetime(filtered_trades['trade_date'], errors='coerce')
+                filtered_trades['month'] = filtered_trades['trade_date'].dt.to_period('M').astype(str)
+                buy_vol = filtered_trades[filtered_trades['trade_type'] == 'Buy'].groupby(['month', 'symbol'])['quantity'].sum().reset_index(name='Buy Volume')
+                sell_vol = filtered_trades[filtered_trades['trade_type'] == 'Sell'].groupby(['month', 'symbol'])['quantity'].sum().reset_index(name='Sell Volume')
+                merged = pd.merge(buy_vol, sell_vol, on=['month', 'symbol'], how='outer').fillna(0)
+                melted = merged.melt(id_vars=['month', 'symbol'], value_vars=['Buy Volume', 'Sell Volume'], var_name='Type', value_name='Volume')
+                fig = px.bar(melted, x='month', y='Volume', color='Type', barmode='group', facet_col='symbol',
+                             title='Monthly Buy/Sell Volume per Symbol')
+                fig.update_layout(xaxis_title='Month', yaxis_title='Volume', height=400,
+                                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A0AEC0'))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data for selected date range.")
+
+        elif selected_analytics == "Cumulative Investment vs. P/L":
+            st.markdown("Tracks your cumulative investment and cumulative P/L over time. Helps you see growth and drawdowns.")
+            if not filtered_trades.empty:
+                filtered_trades['trade_date'] = pd.to_datetime(filtered_trades['trade_date'], errors='coerce')
+                filtered_trades = filtered_trades.sort_values('trade_date')
+                filtered_trades['invested'] = np.where(filtered_trades['trade_type'] == 'Buy', filtered_trades['quantity'] * filtered_trades['price'], 0)
+                filtered_trades['pl'] = filtered_trades['P/L Amount']
+                filtered_trades['cum_invested'] = filtered_trades['invested'].cumsum()
+                filtered_trades['cum_pl'] = filtered_trades['pl'].cumsum()
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=filtered_trades['trade_date'], y=filtered_trades['cum_invested'], mode='lines+markers', name='Cumulative Invested', line=dict(color='#1E88E5')))
+                fig.add_trace(go.Scatter(x=filtered_trades['trade_date'], y=filtered_trades['cum_pl'], mode='lines+markers', name='Cumulative P/L', line=dict(color='#00E396')))
+                fig.update_layout(title='Cumulative Investment vs. Cumulative P/L', xaxis_title='Date', yaxis_title='Amount (Rs.)', height=400,
+                                  paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#A0AEC0'))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data for selected date range.")
+
+        elif selected_analytics == "Win Rate & Average Return":
+            st.markdown("Shows your win rate (profitable trades %) and average return per trade. Helps assess trading effectiveness.")
+            if not filtered_trades.empty:
+                filtered_trades['pl'] = filtered_trades['P/L Amount']
+                wins = filtered_trades[filtered_trades['pl'] > 0]
+                losses = filtered_trades[filtered_trades['pl'] < 0]
+                total_trades = len(filtered_trades)
+                win_rate = len(wins) / total_trades * 100 if total_trades > 0 else 0
+                avg_return = filtered_trades['pl'].mean() if total_trades > 0 else 0
+                best_trade = filtered_trades['pl'].max() if total_trades > 0 else 0
+                worst_trade = filtered_trades['pl'].min() if total_trades > 0 else 0
+                st.metric("Win Rate", f"{win_rate:.2f}%")
+                st.metric("Average Return per Trade", f"Rs. {avg_return:.2f}")
+                st.metric("Best Trade", f"Rs. {best_trade:.2f}")
+                st.metric("Worst Trade", f"Rs. {worst_trade:.2f}")
+                # Pie chart for win/loss
+                fig = px.pie(names=['Wins', 'Losses'], values=[len(wins), len(losses)],
+                             title='Win vs. Loss Trades', color_discrete_sequence=['#00E396', '#FF4560'])
+                fig.update_layout(height=350, paper_bgcolor='rgba(0,0,0,0)', font=dict(color='#A0AEC0'))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No data for selected date range.")
+
+        elif selected_analytics == "Portfolio Allocation by Investment":
+            st.markdown("Shows what percentage of your total investment went to each symbol. Helps visualize portfolio concentration.")
+            if not filtered_trades.empty:
+                # Calculate total investment per symbol (only Buy trades)
+                buy_trades = filtered_trades[filtered_trades['trade_type'] == 'Buy']
+                if not buy_trades.empty:
+                    symbol_investment = buy_trades.groupby('symbol').apply(
+                        lambda x: (x['quantity'] * x['price']).sum()
+                    ).reset_index(name='Total Investment')
+                    
+                    # Create pie chart
+                    fig = px.pie(symbol_investment, 
+                                values='Total Investment', 
+                                names='symbol',
+                                title='Portfolio Allocation by Investment Amount',
+                                color_discrete_sequence=['#1E88E5', '#FF4560', '#00E396', '#FEB019', '#775DD0', '#3F51B5', '#546E7A', '#D4526E', '#8D5B4C', '#F86624'])
+                    
+                    fig.update_layout(
+                        height=500,
+                        paper_bgcolor='rgba(0,0,0,0)', 
+                        font=dict(color='#A0AEC0'),
+                        showlegend=True,
+                        legend=dict(orientation='v', x=1.02, y=0.5)
+                    )
+                    
+                    fig.update_traces(
+                        textposition='inside', 
+                        textinfo='percent+label',
+                        hovertemplate='<b>%{label}</b><br>Investment: Rs. %{value:,.0f}<br>Percentage: %{percent}<extra></extra>'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show investment breakdown table
+                    symbol_investment['Percentage'] = (symbol_investment['Total Investment'] / symbol_investment['Total Investment'].sum() * 100).round(2)
+                    
+                    # Sort by percentage descending for better display
+                    symbol_investment = symbol_investment.sort_values('Percentage', ascending=False)
+                    
+                    # Format for display while keeping numeric sorting
+                    display_df = symbol_investment.copy()
+                    display_df['Total Investment'] = display_df['Total Investment'].apply(lambda x: f"Rs. {x:,.2f}")
+                    
+                    st.dataframe(
+                        display_df[['symbol', 'Total Investment', 'Percentage']], 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "symbol": "Symbol",
+                            "Total Investment": "Total Investment",
+                            "Percentage": st.column_config.NumberColumn("Percentage", format="%.2f%%")
+                        }
+                    )
+                else:
+                    st.info("No buy trades found in the selected date range.")
+            else:
+                st.info("No data for selected date range.")
     
     with tab5:
         st.markdown("### Stock Analytics & Comparison")
@@ -1184,6 +1466,193 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
         if not stock_symbols:
             st.info("No stocks available for analytics. Add stocks to view analytics.")
         else:
+            # --- 7-Day Stock Performance Table ---
+            st.markdown("#### 📈 7-Day Stock Performance")
+            
+            @st.cache_data(ttl=300)  # Cache for 5 minutes
+            def get_7day_performance():
+                try:
+                    # Query prices from database
+                    prices_collection = db.prices
+                    performance_data = []
+                    
+                    for symbol in stock_symbols:
+                        row_data = {"Symbol": symbol}
+                        
+                        # Get recent records for this symbol (more than 7 to ensure we get 7 unique dates)
+                        recent_docs = list(prices_collection.find(
+                            {"symbol": symbol},
+                            sort=[("fetched_at", -1)]
+                        ).limit(50))  # Get more records to find unique days
+                        
+                        if recent_docs:
+                            from datetime import datetime
+                            
+                            # Group by date and keep only the latest record per date (excluding weekends)
+                            date_records = {}
+                            for doc in recent_docs:
+                                fetched_at = doc.get('fetched_at')
+                                if fetched_at:
+                                    # Extract date from timestamp
+                                    if isinstance(fetched_at, str):
+                                        try:
+                                            dt = datetime.fromisoformat(fetched_at.replace('Z', '+00:00'))
+                                            date_str = dt.strftime('%Y-%m-%d')
+                                            weekday = dt.weekday()  # Monday=0, Sunday=6
+                                        except:
+                                            date_str = fetched_at[:10]  # YYYY-MM-DD
+                                            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                                            weekday = date_obj.weekday()
+                                    else:
+                                        date_str = fetched_at.strftime('%Y-%m-%d')
+                                        weekday = fetched_at.weekday()
+                                    
+                                    # Skip weekends (Saturday=5, Sunday=6)
+                                    if weekday >= 5:
+                                        continue
+                                    
+                                    # Keep only the latest record for each date (since we sorted by fetched_at desc)
+                                    if date_str not in date_records:
+                                        date_records[date_str] = doc
+                            
+                            # Sort dates and take the last 7 unique trading days
+                            sorted_dates = sorted(date_records.keys(), reverse=True)[:7]
+                            sorted_dates.reverse()  # Oldest to newest for display
+                            
+                            # Extract percentages for each unique date
+                            for date_str in sorted_dates:
+                                doc = date_records[date_str]
+                                percentage = doc.get('percentage', '0%')
+                                
+                                # Clean percentage string and convert to float
+                                if isinstance(percentage, str):
+                                    clean_pct = percentage.replace('%', '').strip()
+                                    try:
+                                        pct_value = float(clean_pct)
+                                    except ValueError:
+                                        pct_value = None
+                                else:
+                                    pct_value = float(percentage) if percentage else None
+                                
+                                # Format date for display (e.g., "Aug 25")
+                                try:
+                                    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+                                    display_date = date_obj.strftime('%b %d')
+                                except:
+                                    display_date = date_str
+                                
+                                row_data[display_date] = pct_value
+                            
+                            # Calculate net change by summing all daily percentage changes
+                            daily_percentages = []
+                            for date_str in sorted_dates:
+                                doc = date_records[date_str]
+                                percentage = doc.get('percentage', '0%')
+                                
+                                # Clean percentage string and convert to float
+                                if isinstance(percentage, str):
+                                    clean_pct = percentage.replace('%', '').strip()
+                                    try:
+                                        pct_value = float(clean_pct)
+                                        daily_percentages.append(pct_value)
+                                    except ValueError:
+                                        pass  # Skip invalid percentages
+                                else:
+                                    if percentage:
+                                        daily_percentages.append(float(percentage))
+                            
+                            # Sum all daily percentages for net change
+                            if daily_percentages:
+                                net_change = sum(daily_percentages)
+                                row_data["_net_change"] = net_change
+                                
+                                # Debug for first symbol
+                                if symbol == stock_symbols[0]:
+                                    st.write(f"Debug Net Change for {symbol}:")
+                                    st.write(f"Daily percentages: {daily_percentages}")
+                                    st.write(f"Sum (Net Change): {net_change:.2f}%")
+                            else:
+                                row_data["_net_change"] = None
+                        else:
+                            # No data for this symbol
+                            row_data["_net_change"] = None
+                        
+                        performance_data.append(row_data)
+                    
+                    # Create DataFrame
+                    df = pd.DataFrame(performance_data)
+                    
+                    # Reorder columns to put Net Change at the end
+                    if not df.empty:
+                        # Get all columns except Symbol and _net_change
+                        date_columns = [col for col in df.columns if col not in ['Symbol', '_net_change']]
+                        # Sort date columns chronologically
+                        date_columns.sort()
+                        
+                        # Reorder: Symbol, then date columns, then Net Change
+                        column_order = ['Symbol'] + date_columns + ['Net Change (7d)']
+                        
+                        # Rename _net_change to Net Change (7d)
+                        df = df.rename(columns={'_net_change': 'Net Change (7d)'})
+                        
+                        # Reorder columns
+                        df = df.reindex(columns=column_order)
+                    
+                    return df
+                
+                except Exception as e:
+                    st.error(f"Error fetching performance data: {e}")
+                    import traceback
+                    st.error(traceback.format_exc())
+                    return pd.DataFrame()
+            
+            perf_df = get_7day_performance()
+            
+            if not perf_df.empty:
+                # Prepare display dataframe
+                display_df = perf_df.copy()
+                
+                # Format percentage columns with color coding
+                def format_percentage(val):
+                    if pd.isna(val) or val is None:
+                        return "-"
+                    
+                    formatted = f"{val:.2f}%"
+                    if val > 0:
+                        return f"🟢 {formatted}"
+                    elif val < 0:
+                        return f"🔴 {formatted}"
+                    else:
+                        return f"⚪ {formatted}"
+                
+                # Apply formatting to percentage columns (excluding Symbol and Net Change)
+                percentage_cols = [col for col in display_df.columns if col not in ["Symbol", "Net Change (7d)"]]
+                for col in percentage_cols:
+                    if col in display_df.columns:
+                        display_df[col] = display_df[col].apply(format_percentage)
+                
+                # Format Net Change column
+                if "Net Change (7d)" in display_df.columns:
+                    display_df["Net Change (7d)"] = display_df["Net Change (7d)"].apply(format_percentage)
+                
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Symbol": st.column_config.TextColumn("Symbol", width="small"),
+                        **{col: st.column_config.TextColumn(col, width="small") 
+                           for col in display_df.columns if col != "Symbol"}
+                    }
+                )
+                
+                st.caption("🟢 Positive | 🔴 Negative | ⚪ No Change | - No Data")
+                st.caption("*Shows the last 7 days of price data with daily percentage changes.*")
+                
+            else:
+                st.info("📊 No price data available for 7-day performance analysis.")
+            
+            st.markdown("---")  # Separator
             # --- Single Stock Analytics ---
             st.markdown("#### Single Stock Analytics")
             with st.form("analytics_form"):
@@ -1834,4 +2303,19 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                 add_alert(new_alert_symbol, new_min_price, new_max_price, new_alert_enabled)
                 st.success(f"Alert created for {new_alert_symbol}")
                 st.rerun()
+
+# --- Helper: Ensure P/L Amount column exists and is numeric ---
+def ensure_pl_amount(df, prices_df=None):
+    if 'P/L Amount' not in df.columns:
+        # Use get_trades_with_pct_change if available
+        if prices_df is not None:
+            try:
+                df = get_trades_with_pct_change(df, prices_df)
+            except Exception:
+                df['P/L Amount'] = 0.0
+        else:
+            df['P/L Amount'] = 0.0
+    # Ensure numeric
+    df['P/L Amount'] = pd.to_numeric(df['P/L Amount'], errors='coerce').fillna(0.0)
+    return df
 
