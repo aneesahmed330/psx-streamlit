@@ -13,6 +13,31 @@ from dotenv import load_dotenv
 import pytz
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import numpy as np
+import concurrent.futures
+
+
+# helper functions
+
+# --- Number formatting helper ---
+def format_international_number(n):
+    try:
+        n = float(n)
+        abs_n = abs(n)
+        if abs_n >= 1_000_000_000_000:
+            return f"{n/1_000_000_000_000:.2f}T"
+        elif abs_n >= 1_000_000_000:
+            return f"{n/1_000_000_000:.2f}B"
+        elif abs_n >= 1_000_000:
+            return f"{n/1_000_000:.2f}M"
+        elif abs_n >= 1_000:
+            return f"{n/1_000:.2f}K"
+        else:
+            return f"{n:.2f}"
+    except Exception:
+        return n
+
+# ------
 
 # Set page config must be the first Streamlit command
 st.set_page_config(
@@ -81,6 +106,7 @@ def add_stock(symbol):
         }},
         upsert=True
     )
+    get_cached_stocks_df.clear()
 
 def delete_stock(symbol):
     db = get_mongo()
@@ -426,11 +452,25 @@ def fetch_and_save_company_info(symbol):
     )
 
 def fetch_and_save_all_company_info(symbols):
-    for symbol in symbols:
+    """Fetch company info for all symbols in parallel using threads for speed."""
+    def fetch_and_save(symbol):
         try:
             fetch_and_save_company_info(symbol)
+            return (symbol, None)
         except Exception as e:
-            st.warning(f"Error fetching company info for {symbol}: {e}")
+            return (symbol, str(e))
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_symbol = {executor.submit(fetch_and_save, symbol): symbol for symbol in symbols}
+        for future in concurrent.futures.as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                res = future.result()
+                results.append(res)
+            except Exception as exc:
+                results.append((symbol, str(exc)))
+    get_cached_stocks_df.clear()
+    return results
 
 # --- Sidebar: Portfolio Management, Price Actions, Log Trade, Alerts ---
 with st.sidebar:
@@ -442,7 +482,7 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     
     # Price Actions Section
-    with st.expander("🔄 Price Actions", expanded=True):
+    with st.expander("🔄 Price Actions", expanded=False):
         if st.button("💹 Fetch Latest Prices", use_container_width=True,
                     help="Fetch latest prices for all symbols"):
             with st.spinner("Fetching prices..."):
@@ -450,15 +490,19 @@ with st.sidebar:
                 st.success("Prices updated successfully!")
         # New button for company info
         if st.button("🏢 Fetch Company Info", use_container_width=True,
-                    help="Fetch payouts, financials, ratios for all stocks"):
+                    help="Fetch payouts, financials, ratios for all stocks (parallel fetching for speed)"):
             stocks_df = get_stocks()
             stock_symbols = stocks_df['symbol'].tolist() if not stocks_df.empty else []
-            with st.spinner("Fetching company info for all stocks..."):
-                fetch_and_save_all_company_info(stock_symbols)
-                st.success("Company info updated for all stocks!")
+            with st.spinner("Fetching company info for all stocks (parallel)..."):
+                results = fetch_and_save_all_company_info(stock_symbols)
+                errors = [f"{s}: {e}" for s, e in results if e]
+                if errors:
+                    st.warning("Some errors occurred:\n" + "\n".join(errors))
+                else:
+                    st.success("Company info updated for all stocks!")
     
     # Trade Logging Section
-    with st.expander("📝 Log Trade", expanded=True):
+    with st.expander("📝 Log Trade", expanded=False):
         with st.form("trade_form"):
             trade_symbol = st.selectbox("Symbol", portfolio_symbols, key="trade_symbol", 
                                        help="Select symbol for trade") if portfolio_symbols else None
@@ -489,7 +533,7 @@ with st.sidebar:
                 st.rerun()
     
     # Alerts Management Section
-    with st.expander("🔔 Price Alerts", expanded=True):
+    with st.expander("🔔 Price Alerts", expanded=False):
         if portfolio_symbols:
             alert_symbol = st.selectbox("Symbol", portfolio_symbols, key="alert_symbol", 
                                       help="Select symbol for alert")
@@ -547,6 +591,10 @@ def get_trades_df():
     db = get_mongo()
     trades = list(db.trades.find())
     return pd.DataFrame(trades)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_stocks_df():
+    return get_stocks()
 
 # --- Main Content Area ---
 st.title("📈 PSX Portfolio Dashboard")
@@ -753,8 +801,22 @@ with col5:
 # Portfolio visualization and data with enhanced tabs
 if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
     # Create tabs with icons and better styling
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Portfolio Details", "📈 Performance Analytics", "💼 Trade History", "🔔 Alerts Management"])
-    
+    tab_labels = [
+        "📊 Portfolio Details",
+        "📈 Performance Analytics",
+        "💼 Trade History",
+        "📊 Stock Analytics & Comparison",
+        "🔮 Future Predictor",
+        "🔔 Alerts Management"
+    ]
+    tab1, tab2, tab3, tab5, tab6, tab4 = st.tabs(tab_labels)
+    # --- New Tab: Stock Analytics & Comparison ---
+    # tab5_label = "📊 Stock Analytics & Comparison"
+    # tabs = [tab1, tab2, tab3, tab4]
+    # tab5 = st.tabs([tab5_label])[0]
+    # tabs.append(tab5)
+    # --- End Tab Setup ---
+
     with tab1:
         st.markdown("### Portfolio Holdings")
         
@@ -1115,6 +1177,610 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
         else:
             st.info("No trade history available.")
     
+    with tab5:
+        st.markdown("### Stock Analytics & Comparison")
+        stocks_df = get_cached_stocks_df()
+        stock_symbols = stocks_df['symbol'].tolist() if not stocks_df.empty else []
+        if not stock_symbols:
+            st.info("No stocks available for analytics. Add stocks to view analytics.")
+        else:
+            # --- Single Stock Analytics ---
+            st.markdown("#### Single Stock Analytics")
+            with st.form("analytics_form"):
+                selected_stock = st.selectbox("Select Stock for Analysis", stock_symbols, key="analytics_single_stock")
+                show_analytics = st.form_submit_button("Show Analytics")
+            if show_analytics:
+                stock_row = stocks_df[stocks_df['symbol'] == selected_stock.upper()]
+                if not stock_row.empty:
+                    stock_data = stock_row.iloc[0]
+                    # --- Financials ---
+                    st.markdown("**Financials (Annual)**")
+                    st.markdown("Click column headers to sort. Numbers are shown in millions (M), billions (B), or trillions (T) for readability.")
+                    annual_fin = pd.DataFrame(stock_data['financials']['annual']) if stock_data['financials'] and 'annual' in stock_data['financials'] else pd.DataFrame()
+                    if not annual_fin.empty:
+                        # Remove commas before converting to float for numeric columns
+                        for col in ['Mark-up Earned', 'Total Income', 'Profit after Taxation', 'EPS']:
+                            if col in annual_fin.columns:
+                                annual_fin[col] = annual_fin[col].astype(str).str.replace(',', '').astype(float)
+                        # Format numbers for display
+                        display_fin = annual_fin.copy()
+                        for col in ['Mark-up Earned', 'Total Income', 'Profit after Taxation']:
+                            if col in display_fin.columns:
+                                display_fin[col] = display_fin[col].apply(format_international_number)
+                        st.dataframe(display_fin, use_container_width=True, hide_index=True)
+                        # Graph: EPS, Profit after Tax, Total Income
+                        fig = go.Figure()
+                        if 'EPS' in annual_fin.columns:
+                            fig.add_trace(go.Bar(x=annual_fin['period'], y=annual_fin['EPS'], name='EPS'))
+                        if 'Profit after Taxation' in annual_fin.columns:
+                            fig.add_trace(go.Bar(x=annual_fin['period'], y=annual_fin['Profit after Taxation'], name='Profit after Taxation'))
+                        if 'Total Income' in annual_fin.columns:
+                            fig.add_trace(go.Bar(x=annual_fin['period'], y=annual_fin['Total Income'], name='Total Income'))
+                        fig.update_layout(barmode='group', title=f"{selected_stock} Key Financials (Annual)", xaxis_title="Year", yaxis_title="Amount", height=400)
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No annual financials available.")
+                    # --- Payouts ---
+                    st.markdown("**Dividend Payouts**")
+                    payouts = pd.DataFrame(stock_data['payouts']) if stock_data['payouts'] else pd.DataFrame()
+                    if not payouts.empty:
+                        st.dataframe(payouts, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No payout data available.")
+                    # --- Ratios ---
+                    st.markdown("**Key Ratios**")
+                    ratios = pd.DataFrame(stock_data['ratios']) if stock_data['ratios'] else pd.DataFrame()
+                    if not ratios.empty:
+                        # Remove commas and parentheses before converting to float for numeric columns
+                        for col in ['EPS Growth (%)', 'Net Profit Margin (%)', 'PEG']:
+                            if col in ratios.columns:
+                                ratios[col] = ratios[col].astype(str).str.replace(r'[^\d\.-]', '', regex=True)
+                                ratios[col] = pd.to_numeric(ratios[col], errors='coerce')
+                        st.dataframe(ratios, use_container_width=True, hide_index=True)
+                        # Graph: EPS Growth, Net Profit Margin
+                        fig2 = go.Figure()
+                        if 'EPS Growth (%)' in ratios.columns:
+                            fig2.add_trace(go.Scatter(x=ratios['period'], y=ratios['EPS Growth (%)'], mode='lines+markers', name='EPS Growth (%)'))
+                        if 'Net Profit Margin (%)' in ratios.columns:
+                            fig2.add_trace(go.Scatter(x=ratios['period'], y=ratios['Net Profit Margin (%)'], mode='lines+markers', name='Net Profit Margin (%)'))
+                        fig2.update_layout(title=f"{selected_stock} Ratios Over Time", xaxis_title="Year", yaxis_title="%", height=400)
+                        st.plotly_chart(fig2, use_container_width=True)
+                    else:
+                        st.info("No ratio data available.")
+                    # --- Scoring System ---
+                    st.markdown("**Stock Score (out of 10)**")
+                    def score_stock(annual_fin, ratios, payouts):
+                        score = 0
+                        reasons = []
+                        # EPS Growth
+                        if not ratios.empty and 'EPS Growth (%)' in ratios.columns:
+                            eps_growth = ratios['EPS Growth (%)'].astype(float).mean()
+                            if eps_growth > 20:
+                                score += 2
+                                reasons.append("Strong EPS growth")
+                            elif eps_growth > 5:
+                                score += 1
+                                reasons.append("Moderate EPS growth")
+                            else:
+                                reasons.append("Low EPS growth")
+                        # Net Profit Margin
+                        if not ratios.empty and 'Net Profit Margin (%)' in ratios.columns:
+                            margin = ratios['Net Profit Margin (%)'].astype(float).mean()
+                            if margin > 15:
+                                score += 2
+                                reasons.append("High profit margin")
+                            elif margin > 8:
+                                score += 1
+                                reasons.append("Moderate profit margin")
+                            else:
+                                reasons.append("Low profit margin")
+                        # PEG Ratio
+                        if not ratios.empty and 'PEG' in ratios.columns:
+                            peg = ratios['PEG'].astype(float).mean()
+                            if peg < 1:
+                                score += 2
+                                reasons.append("Attractive PEG ratio (<1)")
+                            elif peg < 2:
+                                score += 1
+                                reasons.append("Fair PEG ratio (<2)")
+                            else:
+                                reasons.append("High PEG ratio")
+                        # Dividend Consistency
+                        if not payouts.empty:
+                            if len(payouts) >= 4:
+                                score += 2
+                                reasons.append("Consistent dividend payouts")
+                            elif len(payouts) >= 2:
+                                score += 1
+                                reasons.append("Some dividend payouts")
+                            else:
+                                reasons.append("Few or no dividends")
+                        # Recent EPS/Profit Growth
+                        if not annual_fin.empty and 'EPS' in annual_fin.columns:
+                            eps = annual_fin['EPS'].astype(float)
+                            if len(eps) >= 2 and eps.iloc[-1] > eps.iloc[-2]:
+                                score += 1
+                                reasons.append("Recent EPS growth")
+                        score = min(score, 10)
+                        return score, reasons
+                    score, reasons = score_stock(annual_fin, ratios, payouts)
+                    st.metric(label="Stock Score", value=f"{score}/10")
+                    st.markdown("<ul>" + "".join([f"<li>{r}</li>" for r in reasons]) + "</ul>", unsafe_allow_html=True)
+            st.markdown("---")
+            # --- Multi-Stock Comparison ---
+            st.markdown("#### Multi-Stock Comparison")
+            with st.form("multi_stock_comparison_form"):
+                compare_stocks = st.multiselect("Select Stocks to Compare", stock_symbols, default=stock_symbols[:2], key="analytics_multi_stock")
+                compare_submitted = st.form_submit_button("Compare")
+            if compare_submitted and compare_stocks:
+                comp_df = stocks_df[stocks_df['symbol'].isin(compare_stocks)]
+                # Compare EPS (latest year), Profit after Tax, Net Profit Margin, PEG, Dividend Count
+                comp_data = []
+                for _, row in comp_df.iterrows():
+                    symbol = row['symbol']
+                    annual = pd.DataFrame(row['financials']['annual']) if row['financials'] and 'annual' in row['financials'] else pd.DataFrame()
+                    ratios = pd.DataFrame(row['ratios']) if row['ratios'] else pd.DataFrame()
+                    payouts = pd.DataFrame(row['payouts']) if row['payouts'] else pd.DataFrame()
+                    # Remove commas for numeric columns in annual and ratios
+                    for col in ['Mark-up Earned', 'Total Income', 'Profit after Taxation', 'EPS']:
+                        if col in annual.columns:
+                            annual[col] = annual[col].astype(str).str.replace(',', '').astype(float)
+                    for col in ['EPS Growth (%)', 'Net Profit Margin (%)', 'PEG']:
+                        if col in ratios.columns:
+                            ratios[col] = ratios[col].astype(str).str.replace(r'[^\d\.-]', '', regex=True)
+                            ratios[col] = pd.to_numeric(ratios[col], errors='coerce')
+                    # Metrics for scoring
+                    # EPS Growth (last 3 years avg)
+                    eps_growths = []
+                    if 'EPS' in annual.columns and len(annual) >= 2:
+                        eps_vals = annual['EPS'].values[::-1]  # oldest to newest
+                        for i in range(1, len(eps_vals)):
+                            prev, curr = eps_vals[i-1], eps_vals[i]
+                            if prev != 0:
+                                eps_growths.append((curr - prev) / abs(prev) * 100)
+                    avg_eps_growth = sum(eps_growths[-3:]) / min(3, len(eps_growths)) if eps_growths else 0
+                    # Net Profit Margin (avg)
+                    avg_margin = ratios['Net Profit Margin (%)'].mean() if 'Net Profit Margin (%)' in ratios.columns and not ratios.empty else 0
+                    # PEG Ratio (avg, lower is better)
+                    avg_peg = ratios['PEG'].mean() if 'PEG' in ratios.columns and not ratios.empty else None
+                    # Dividend Consistency
+                    div_count = len(payouts)
+                    # Dividend Growth (last 3 payouts)
+                    div_growth = 0
+                    if div_count >= 2:
+                        try:
+                            # Extract payout % from Details (e.g., '110%(F) (D)')
+                            payout_perc = [float(re.search(r'(\d+\.?\d*)%', d['Details']).group(1)) for d in payouts.to_dict('records') if re.search(r'(\d+\.?\d*)%', d['Details'])]
+                            if len(payout_perc) >= 2:
+                                div_growth = (payout_perc[0] - payout_perc[-1]) / abs(payout_perc[-1]) * 100 if payout_perc[-1] != 0 else 0
+                        except Exception:
+                            div_growth = 0
+                    # Profit after Tax Growth (last 3 years avg)
+                    pat_growths = []
+                    if 'Profit after Taxation' in annual.columns and len(annual) >= 2:
+                        pat_vals = annual['Profit after Taxation'].values[::-1]
+                        for i in range(1, len(pat_vals)):
+                            prev, curr = pat_vals[i-1], pat_vals[i]
+                            if prev != 0:
+                                pat_growths.append((curr - prev) / abs(prev) * 100)
+                    avg_pat_growth = sum(pat_growths[-3:]) / min(3, len(pat_growths)) if pat_growths else 0
+                    # EPS Level (latest year)
+                    latest_eps = float(annual['EPS'].iloc[-1]) if not annual.empty and 'EPS' in annual.columns else None
+                    # Profit Margin Trend (last 3 years)
+                    margin_trend = 0
+                    if 'Net Profit Margin (%)' in ratios.columns and len(ratios) >= 2:
+                        margin_vals = ratios['Net Profit Margin (%)'].values[::-1]
+                        if len(margin_vals) >= 2 and margin_vals[-1] != 0:
+                            margin_trend = (margin_vals[0] - margin_vals[-1]) / abs(margin_vals[-1]) * 100
+                    comp_data.append({
+                        'Symbol': symbol,
+                        'Latest EPS': latest_eps,
+                        'Latest Profit': float(annual['Profit after Taxation'].iloc[-1]) if not annual.empty and 'Profit after Taxation' in annual.columns else None,
+                        'Net Profit Margin (%)': avg_margin,
+                        'PEG': avg_peg,
+                        'Dividend Count': div_count,
+                        'EPS Growth': avg_eps_growth,
+                        'PAT Growth': avg_pat_growth,
+                        'Dividend Growth': div_growth,
+                        'Margin Trend': margin_trend
+                    })
+                comp_df_final = pd.DataFrame(comp_data)
+                # --- Relative Scoring ---
+                # Define weights
+                weights = {
+                    'EPS Growth': 2.0,
+                    'Net Profit Margin (%)': 1.5,
+                    'PEG': 1.5,
+                    'Dividend Count': 1.5,
+                    'Dividend Growth': 1.0,
+                    'PAT Growth': 1.0,
+                    'Latest EPS': 0.5,
+                    'Margin Trend': 1.0
+                }
+                # Normalize metrics (min-max, except PEG: lower is better)
+                norm_df = comp_df_final.copy()
+                for col in ['EPS Growth', 'Net Profit Margin (%)', 'Dividend Count', 'Dividend Growth', 'PAT Growth', 'Latest EPS', 'Margin Trend']:
+                    if col in norm_df.columns:
+                        minv, maxv = norm_df[col].min(), norm_df[col].max()
+                        if maxv != minv:
+                            norm_df[col] = (norm_df[col] - minv) / (maxv - minv)
+                        else:
+                            norm_df[col] = 1  # If all same, give full score
+                # PEG: lower is better
+                if 'PEG' in norm_df.columns:
+                    minv, maxv = norm_df['PEG'].min(), norm_df['PEG'].max()
+                    if maxv != minv:
+                        norm_df['PEG'] = (maxv - norm_df['PEG']) / (maxv - minv)
+                    else:
+                        norm_df['PEG'] = 1
+                # Calculate weighted score
+                norm_df['Score'] = 0
+                for k, w in weights.items():
+                    if k in norm_df.columns:
+                        norm_df['Score'] += norm_df[k].fillna(0) * w
+                # Scale to 10
+                max_score = sum(weights.values())
+                norm_df['Score'] = (norm_df['Score'] / max_score * 10).round(2)
+                # Merge score into comp_df_final
+                comp_df_final['Score'] = norm_df['Score']
+                st.dataframe(comp_df_final[['Symbol','Latest EPS','Latest Profit','Net Profit Margin (%)','PEG','Dividend Count','Score']], use_container_width=True, hide_index=True)
+                # --- Score Bar Chart ---
+                fig_score = go.Figure(data=[go.Bar(
+                    x=comp_df_final['Symbol'],
+                    y=comp_df_final['Score'],
+                    marker_color='#1E88E5',
+                    text=comp_df_final['Score'],
+                    textposition='auto',
+                    name='Score'
+                )])
+                fig_score.update_layout(title="Relative Stock Score (Best = Highest)", yaxis_title="Score (0-10)", xaxis_title="Symbol", height=350)
+                st.plotly_chart(fig_score, use_container_width=True)
+                # Comparison Graphs
+                fig_cmp = make_subplots(rows=1, cols=2, subplot_titles=("EPS", "Net Profit Margin (%)"))
+                fig_cmp.add_trace(go.Bar(x=comp_df_final['Symbol'], y=comp_df_final['Latest EPS'], name='EPS'), row=1, col=1)
+                fig_cmp.add_trace(go.Bar(x=comp_df_final['Symbol'], y=comp_df_final['Net Profit Margin (%)'], name='Net Profit Margin'), row=1, col=2)
+                fig_cmp.update_layout(height=400, showlegend=False)
+                st.plotly_chart(fig_cmp, use_container_width=True)
+                # PEG and Dividend Count
+                fig_cmp2 = make_subplots(rows=1, cols=2, subplot_titles=("PEG Ratio", "Dividend Count"))
+                fig_cmp2.add_trace(go.Bar(x=comp_df_final['Symbol'], y=comp_df_final['PEG'], name='PEG'), row=1, col=1)
+                fig_cmp2.add_trace(go.Bar(x=comp_df_final['Symbol'], y=comp_df_final['Dividend Count'], name='Dividends'), row=1, col=2)
+                fig_cmp2.update_layout(height=400, showlegend=False)
+                st.plotly_chart(fig_cmp2, use_container_width=True)
+
+                # --- Color function for table ---
+                def colorize_comp(val, col):
+                    if pd.isnull(val):
+                        return ''
+                    try:
+                        if col in ['PEG']:
+                            # Lower is better
+                            if val == comp_df_final[col].min():
+                                return 'color: #00E396; font-weight: bold;'
+                            elif val == comp_df_final[col].max():
+                                return 'color: #FF4560;'
+                        else:
+                            # Higher is better
+                            if val == comp_df_final[col].max():
+                                return 'color: #00E396; font-weight: bold;'
+                            elif val == comp_df_final[col].min():
+                                return 'color: #FF4560;'
+                    except:
+                        pass
+                    return ''
+                st.markdown("**How to read this table:** Green = best value, Red = worst value for each metric. Score is a weighted sum (see below). ⭐ = best-in-class.")
+                styled_comp = comp_df_final[['Symbol','Latest EPS','Latest Profit','Net Profit Margin (%)','PEG','Dividend Count','Score']].copy()
+                # Add star for best in each metric
+                for col in ['Latest EPS','Latest Profit','Net Profit Margin (%)','PEG','Dividend Count','Score']:
+                    if col in styled_comp.columns:
+                        best = styled_comp[col].max() if col != 'PEG' else styled_comp[col].min()
+                        styled_comp[col] = styled_comp[col].apply(lambda v: f"⭐ {v}" if v == best else v)
+                styled_comp = styled_comp.style.applymap(lambda v: colorize_comp(float(str(v).replace('⭐','').strip()), 'Latest EPS'), subset=['Latest EPS']) \
+                    .applymap(lambda v: colorize_comp(float(str(v).replace('⭐','').strip()), 'Latest Profit'), subset=['Latest Profit']) \
+                    .applymap(lambda v: colorize_comp(float(str(v).replace('⭐','').strip()), 'Net Profit Margin (%)'), subset=['Net Profit Margin (%)']) \
+                    .applymap(lambda v: colorize_comp(float(str(v).replace('⭐','').strip()), 'PEG'), subset=['PEG']) \
+                    .applymap(lambda v: colorize_comp(float(str(v).replace('⭐','').strip()), 'Dividend Count'), subset=['Dividend Count']) \
+                    .applymap(lambda v: colorize_comp(float(str(v).replace('⭐','').strip()), 'Score'), subset=['Score'])
+                st.dataframe(styled_comp, use_container_width=True, hide_index=True)
+
+                # --- Radar/Spider Chart for Score Breakdown ---
+                st.markdown("**Radar Chart: Stock Strengths Across Metrics**")
+                st.markdown("This chart shows how each stock performs (0=worst, 1=best among compared) in each metric. The bigger the area, the stronger the stock overall.")
+                radar_metrics = ['EPS Growth','Net Profit Margin (%)','PEG','Dividend Count','Dividend Growth','PAT Growth','Latest EPS','Margin Trend']
+                radar_labels = ['EPS Growth','Profit Margin','PEG (lower=better)','Dividends','Div. Growth','PAT Growth','EPS','Margin Trend']
+                radar_norm = norm_df[radar_metrics].fillna(0).clip(0,1)
+                fig_radar = go.Figure()
+                for i, row in radar_norm.iterrows():
+                    values = row.values.tolist()
+                    values += values[:1]  # close the loop
+                    fig_radar.add_trace(go.Scatterpolar(
+                        r=values,
+                        theta=radar_labels + [radar_labels[0]],
+                        fill='toself',
+                        name=comp_df_final.iloc[i]['Symbol'],
+                        opacity=0.5
+                    ))
+                fig_radar.update_layout(
+                    polar=dict(radialaxis=dict(visible=True, range=[0,1])),
+                    showlegend=True,
+                    height=450
+                )
+                st.plotly_chart(fig_radar, use_container_width=True)
+
+                # --- Stacked Bar Chart for Score Breakdown ---
+                st.markdown("**Score Breakdown by Metric (Stacked Bar)**")
+                st.markdown("Each bar shows how much each metric contributed to the total score for each stock.")
+                metric_contribs = []
+                for i, row in norm_df.iterrows():
+                    contrib = {k: row[k]*w for k, w in weights.items()}
+                    contrib['Symbol'] = comp_df_final.iloc[i]['Symbol']
+                    metric_contribs.append(contrib)
+                contrib_df = pd.DataFrame(metric_contribs)
+                fig_stack = go.Figure()
+                for k in weights.keys():
+                    fig_stack.add_trace(go.Bar(
+                        x=contrib_df['Symbol'],
+                        y=contrib_df[k],
+                        name=k
+                    ))
+                fig_stack.update_layout(barmode='stack', height=400, yaxis_title='Score Contribution', xaxis_title='Symbol')
+                st.plotly_chart(fig_stack, use_container_width=True)
+
+                # --- Trend Line Chart for Selected Metric ---
+                st.markdown("**Metric Trend Over Time**")
+                st.markdown("Select a metric to see how it has changed over time for each stock.")
+                trend_options = {
+                    'EPS (Annual)': ('annual','EPS'),
+                    'Profit after Tax (Annual)': ('annual','Profit after Taxation'),
+                    'Net Profit Margin (%) (Yearly)': ('ratios','Net Profit Margin (%)'),
+                    'Dividend % (from Details)': ('payouts','Details')
+                }
+                trend_metric = st.selectbox("Select Metric for Trend Chart", list(trend_options.keys()), key="trend_metric_select")
+                trend_type, trend_col = trend_options[trend_metric]
+                fig_trend = go.Figure()
+                for _, row in comp_df.iterrows():
+                    symbol = row['symbol']
+                    if trend_type == 'annual':
+                        annual = pd.DataFrame(row['financials']['annual']) if row['financials'] and 'annual' in row['financials'] else pd.DataFrame()
+                        if not annual.empty and trend_col in annual.columns:
+                            y = annual[trend_col].astype(str).str.replace(',', '').astype(float)
+                            x = annual['period']
+                            fig_trend.add_trace(go.Scatter(x=x, y=y, mode='lines+markers', name=symbol))
+                    elif trend_type == 'ratios':
+                        ratios = pd.DataFrame(row['ratios']) if row['ratios'] else pd.DataFrame()
+                        if not ratios.empty and trend_col in ratios.columns:
+                            y = ratios[trend_col].astype(str).str.replace(r'[^\d\.-]', '', regex=True)
+                            y = pd.to_numeric(y, errors='coerce')
+                            x = ratios['period']
+                            fig_trend.add_trace(go.Scatter(x=x, y=y, mode='lines+markers', name=symbol))
+                    elif trend_type == 'payouts':
+                        payouts = pd.DataFrame(row['payouts']) if row['payouts'] else pd.DataFrame()
+                        if not payouts.empty and 'Details' in payouts.columns:
+                            # Extract payout % from Details
+                            payout_perc = [float(re.search(r'(\d+\.?\d*)%', d).group(1)) for d in payouts['Details'] if re.search(r'(\d+\.?\d*)%', d)]
+                            x = payouts['Financial Results'][:len(payout_perc)]
+                            fig_trend.add_trace(go.Scatter(x=x, y=payout_perc, mode='lines+markers', name=symbol))
+                fig_trend.update_layout(height=400, yaxis_title=trend_metric, xaxis_title='Period/Year')
+                st.plotly_chart(fig_trend, use_container_width=True)
+
+    with tab6:
+        st.markdown("# Future Capital & Dividend Predictor")
+        st.markdown("""
+        Enter your investment details and let the system project your future capital and monthly dividends, using the best stocks based on the scoring system. Dividends are assumed to be reinvested. All projections are based on historical growth and payout patterns.
+        """)
+        # --- UI Inputs ---
+        with st.form("future_predictor_form"):
+            invest_amt = st.number_input("Investment Amount (Rs.)", min_value=1000.0, value=100000.0, step=1000.0)
+            years = st.number_input("Investment Duration (years)", min_value=1, max_value=30, value=5, step=1)
+            num_stocks = st.number_input("Number of Stocks to Include", min_value=1, max_value=20, value=5, step=1)
+            weighting_method = st.selectbox("Weighting Method", ["Proportional to Score", "Equal Weight"], index=0)
+            submitted = st.form_submit_button("Simulate Future Portfolio")
+        if submitted:
+            # --- Stock Selection ---
+            stocks_df = get_stocks()
+            if stocks_df.empty:
+                st.warning("No stocks available for simulation.")
+            else:
+                # Use the same scoring as in comparison
+                comp_data = []
+                for _, row in stocks_df.iterrows():
+                    symbol = row['symbol']
+                    annual = pd.DataFrame(row['financials']['annual']) if row['financials'] and 'annual' in row['financials'] else pd.DataFrame()
+                    ratios = pd.DataFrame(row['ratios']) if row['ratios'] else pd.DataFrame()
+                    payouts = pd.DataFrame(row['payouts']) if row['payouts'] else pd.DataFrame()
+                    for col in ['Mark-up Earned', 'Total Income', 'Profit after Taxation', 'EPS']:
+                        if col in annual.columns:
+                            annual[col] = annual[col].astype(str).str.replace(',', '').astype(float)
+                    for col in ['EPS Growth (%)', 'Net Profit Margin (%)', 'PEG']:
+                        if col in ratios.columns:
+                            ratios[col] = ratios[col].astype(str).str.replace(r'[^\d\.-]', '', regex=True)
+                            ratios[col] = pd.to_numeric(ratios[col], errors='coerce')
+                    eps_growths = []
+                    if 'EPS' in annual.columns and len(annual) >= 2:
+                        eps_vals = annual['EPS'].values[::-1]
+                        for i in range(1, len(eps_vals)):
+                            prev, curr = eps_vals[i-1], eps_vals[i]
+                            if prev != 0:
+                                eps_growths.append((curr - prev) / abs(prev) * 100)
+                    avg_eps_growth = sum(eps_growths[-3:]) / min(3, len(eps_growths)) if eps_growths else 0
+                    avg_margin = ratios['Net Profit Margin (%)'].mean() if 'Net Profit Margin (%)' in ratios.columns and not ratios.empty else 0
+                    avg_peg = ratios['PEG'].mean() if 'PEG' in ratios.columns and not ratios.empty else None
+                    div_count = len(payouts)
+                    div_growth = 0
+                    if div_count >= 2:
+                        try:
+                            payout_perc = [float(re.search(r'(\d+\.?\d*)%', d['Details']).group(1)) for d in payouts.to_dict('records') if re.search(r'(\d+\.?\d*)%', d['Details'])]
+                            if len(payout_perc) >= 2:
+                                div_growth = (payout_perc[0] - payout_perc[-1]) / abs(payout_perc[-1]) * 100 if payout_perc[-1] != 0 else 0
+                        except Exception:
+                            div_growth = 0
+                    pat_growths = []
+                    if 'Profit after Taxation' in annual.columns and len(annual) >= 2:
+                        pat_vals = annual['Profit after Taxation'].values[::-1]
+                        for i in range(1, len(pat_vals)):
+                            prev, curr = pat_vals[i-1], pat_vals[i]
+                            if prev != 0:
+                                pat_growths.append((curr - prev) / abs(prev) * 100)
+                    avg_pat_growth = sum(pat_growths[-3:]) / min(3, len(pat_growths)) if pat_growths else 0
+                    latest_eps = float(annual['EPS'].iloc[-1]) if not annual.empty and 'EPS' in annual.columns else None
+                    margin_trend = 0
+                    if 'Net Profit Margin (%)' in ratios.columns and len(ratios) >= 2:
+                        margin_vals = ratios['Net Profit Margin (%)'].values[::-1]
+                        if len(margin_vals) >= 2 and margin_vals[-1] != 0:
+                            margin_trend = (margin_vals[0] - margin_vals[-1]) / abs(margin_vals[-1]) * 100
+                    comp_data.append({
+                        'Symbol': symbol,
+                        'Latest EPS': latest_eps,
+                        'Net Profit Margin (%)': avg_margin,
+                        'PEG': avg_peg,
+                        'Dividend Count': div_count,
+                        'EPS Growth': avg_eps_growth,
+                        'PAT Growth': avg_pat_growth,
+                        'Dividend Growth': div_growth,
+                        'Margin Trend': margin_trend,
+                        'Annual': annual,
+                        'Payouts': payouts
+                    })
+                comp_df = pd.DataFrame(comp_data)
+                # --- Scoring (same as comparison) ---
+                weights = {
+                    'EPS Growth': 2.0,
+                    'Net Profit Margin (%)': 1.5,
+                    'PEG': 1.5,
+                    'Dividend Count': 1.5,
+                    'Dividend Growth': 1.0,
+                    'PAT Growth': 1.0,
+                    'Latest EPS': 0.5,
+                    'Margin Trend': 1.0
+                }
+                norm_df = comp_df.copy()
+                for col in ['EPS Growth', 'Net Profit Margin (%)', 'Dividend Count', 'Dividend Growth', 'PAT Growth', 'Latest EPS', 'Margin Trend']:
+                    if col in norm_df.columns:
+                        minv, maxv = norm_df[col].min(), norm_df[col].max()
+                        if maxv != minv:
+                            norm_df[col] = (norm_df[col] - minv) / (maxv - minv)
+                        else:
+                            norm_df[col] = 1
+                if 'PEG' in norm_df.columns:
+                    minv, maxv = norm_df['PEG'].min(), norm_df['PEG'].max()
+                    if maxv != minv:
+                        norm_df['PEG'] = (maxv - norm_df['PEG']) / (maxv - minv)
+                    else:
+                        norm_df['PEG'] = 1
+                norm_df['Score'] = 0
+                for k, w in weights.items():
+                    if k in norm_df.columns:
+                        norm_df['Score'] += norm_df[k].fillna(0) * w
+                max_score = sum(weights.values())
+                norm_df['Score'] = (norm_df['Score'] / max_score * 10).round(2)
+                comp_df['Score'] = norm_df['Score']
+                # --- Select Top N Stocks ---
+                comp_df = comp_df.sort_values('Score', ascending=False).reset_index(drop=True)
+                top_stocks = comp_df.head(int(num_stocks))
+                if top_stocks.empty:
+                    st.warning("No stocks available for simulation.")
+                else:
+                    if weighting_method == "Equal Weight":
+                        weights_arr = np.ones(len(top_stocks)) / len(top_stocks)
+                    else:
+                        scores = top_stocks['Score'].values
+                        weights_arr = scores / scores.sum() if scores.sum() > 0 else np.ones(len(scores)) / len(scores)
+                    top_stocks = top_stocks.copy()
+                    top_stocks['Weight'] = weights_arr
+                    # --- Realistic Simulation ---
+                    periods = years
+                    annual_results = []
+                    capital = 0.0
+                    stock_caps = np.zeros(len(top_stocks))
+                    total_investment = 0.0
+                    # Estimate annual price growth and dividend yield for each stock (capped)
+                    price_cagrs = []
+                    div_yields = []
+                    for idx, row in top_stocks.iterrows():
+                        annual = row['Annual']
+                        payouts = row['Payouts']
+                        # Price CAGR: use EPS growth as proxy if price not available, cap at 12%
+                        if 'EPS' in annual.columns and len(annual) >= 2:
+                            eps_vals = annual['EPS'].values[::-1]
+                            n = len(eps_vals) - 1
+                            if n > 0 and eps_vals[0] > 0:
+                                cagr = (eps_vals[-1] / eps_vals[0]) ** (1/n) - 1
+                            else:
+                                cagr = 0.08
+                        else:
+                            cagr = 0.08
+                        cagr = max(0.04, min(0.12, cagr))  # Cap between 4% and 12%
+                        price_cagrs.append(cagr)
+                        # Dividend yield: average of last 3 payouts as % of EPS or capital, cap at 7%
+                        if not payouts.empty and 'Details' in payouts.columns:
+                            payout_perc = [float(re.search(r'(\d+\.?\d*)%', d).group(1)) for d in payouts['Details'] if re.search(r'(\d+\.?\d*)%', d)]
+                            avg_payout = np.mean(payout_perc[-3:]) if payout_perc else 0
+                            div_yield = avg_payout / 100
+                        else:
+                            div_yield = 0.03
+                        div_yield = max(0.01, min(0.07, div_yield))  # Cap between 1% and 7%
+                        div_yields.append(div_yield)
+                    # --- Simulate each year ---
+                    for year in range(1, periods+1):
+                        # Add new investment for the year
+                        capital += invest_amt * 12
+                        total_investment += invest_amt * 12
+                        stock_caps += (invest_amt * 12) * top_stocks['Weight'].values
+                        # Apply annual price growth
+                        for i in range(len(stock_caps)):
+                            stock_caps[i] *= (1 + price_cagrs[i])
+                        # Dividends for this year
+                        dividends = [stock_caps[i] * div_yields[i] for i in range(len(stock_caps))]
+                        total_div = sum(dividends)
+                        # Reinvest dividends
+                        capital = sum(stock_caps) + total_div
+                        stock_caps = (np.array(stock_caps) + np.array(dividends))
+                        # Rebalance to weights (annually)
+                        stock_caps = capital * top_stocks['Weight'].values
+                        annual_results.append({
+                            'Year': year,
+                            'Capital': capital,
+                            'Total Dividend': total_div
+                        })
+                    # --- Output ---
+                    st.success(f"Simulation complete! Portfolio of {len(top_stocks)} stocks.")
+                    st.markdown(f"**Total Investment:** Rs. {total_investment:,.2f}")
+                    st.markdown(f"**Final Projected Capital:** Rs. {capital:,.2f}")
+                    avg_annual_div = np.mean([r['Total Dividend'] for r in annual_results[-1:]])
+                    st.markdown(f"**Projected Annual Dividend (last year):** Rs. {avg_annual_div:,.2f}")
+                    st.markdown(f"**Projected Monthly Dividend (last year avg):** Rs. {avg_annual_div/12:,.2f}")
+                    # ROI and CAGR
+                    roi = (capital - total_investment) / total_investment * 100 if total_investment > 0 else 0
+                    cagr = ((capital / total_investment) ** (1/years) - 1) * 100 if total_investment > 0 else 0
+                    st.markdown(f"**ROI:** {roi:.2f}%")
+                    st.markdown(f"**CAGR:** {cagr:.2f}%")
+                    # Chart: Capital and Dividend over time
+                    years_list = [r['Year'] for r in annual_results]
+                    capitals = [r['Capital'] for r in annual_results]
+                    dividends = [r['Total Dividend'] for r in annual_results]
+                    fig_proj = go.Figure()
+                    fig_proj.add_trace(go.Scatter(x=years_list, y=capitals, mode='lines+markers', name='Capital'))
+                    fig_proj.add_trace(go.Scatter(x=years_list, y=dividends, mode='lines+markers', name='Annual Dividend'))
+                    fig_proj.update_layout(title="Projected Capital & Annual Dividend Over Time", xaxis_title="Year", yaxis_title="Rs.", height=400)
+                    st.plotly_chart(fig_proj, use_container_width=True)
+                    # Table: Yearly breakdown
+                    st.markdown("**Yearly Breakdown**")
+                    st.dataframe(pd.DataFrame(annual_results), use_container_width=True, hide_index=True)
+                    # Show selected stocks and weights
+                    st.markdown("**Selected Stocks and Weights**")
+                    st.dataframe(top_stocks[['Symbol','Score','Weight']], use_container_width=True, hide_index=True)
+                    # Notes
+                    st.info("""
+                    **Assumptions (Realistic Simulation):**
+                    - Price growth is estimated from historical EPS growth (CAGR), capped at 12% per year.
+                    - Dividend yield is based on recent payout history, capped at 7% per year.
+                    - Compounding and rebalancing are annual (not monthly).
+                    - Dividends are reinvested at year end.
+                    - If fewer stocks are available than requested, all are used.
+                    - This is a simulation, not a guarantee. Past performance does not guarantee future results.
+                    - ROI = (Final Capital - Total Invested) / Total Invested. CAGR = annualized return.
+                    """)
+    
     with tab4:
         st.markdown("### Alerts Management")
         alerts_df = get_alerts() if 'get_alerts' in globals() else pd.DataFrame()
@@ -1168,3 +1834,4 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                 add_alert(new_alert_symbol, new_min_price, new_max_price, new_alert_enabled)
                 st.success(f"Alert created for {new_alert_symbol}")
                 st.rerun()
+
