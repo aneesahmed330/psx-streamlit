@@ -107,15 +107,28 @@ def add_stock(symbol):
         }},
         upsert=True
     )
+    # Invalidate both caches when stock is added
     get_cached_stocks_df.clear()
+    get_stock_symbols_only.clear()
 
 def delete_stock(symbol):
     db = get_mongo()
     db.stocks.delete_one({'symbol': symbol.upper()})
+    # Invalidate both caches when stock is deleted
+    get_cached_stocks_df.clear()
+    get_stock_symbols_only.clear()
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_cached_stocks_df():
     return get_stocks()
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_stock_symbols_only():
+    """Fast function to get just stock symbols without full data"""
+    db = get_mongo()
+    # Only fetch symbol field, not the heavy financial data
+    docs = list(db.stocks.find({}, {"symbol": 1, "_id": 0}))
+    return [doc["symbol"] for doc in docs]
 
 # Custom CSS for professional styling with enhanced tabs
 st.markdown("""
@@ -516,7 +529,9 @@ def fetch_and_save_all_company_info(symbols):
                 symbol = future_to_symbol[future]
                 results.append((symbol, str(exc)))
     
+    # Invalidate both caches when company info is fetched
     get_cached_stocks_df.clear()
+    get_stock_symbols_only.clear()
     return results
 
 # --- Sidebar: Portfolio Management, Price Actions, Log Trade, Alerts ---
@@ -655,8 +670,8 @@ with st.sidebar:
     
     # --- Stocks Management Section ---
     with st.expander("🏦 Manage Stock Symbols", expanded=False):
-        stocks_df = get_stocks()
-        stock_symbols = stocks_df['symbol'].tolist() if not stocks_df.empty else []
+        # Use fast symbol-only fetch for UI display
+        stock_symbols = get_stock_symbols_only()
         # Remove symbol UI
         if stock_symbols:
             remove_col1, remove_col2 = st.columns([3,1])
@@ -700,6 +715,13 @@ st.title("📈 PSX Portfolio Dashboard")
 price_hist_df = get_price_history_df(portfolio_symbols)
 trades_df = get_trades_df()
 alerts_df = get_alerts()
+
+# Pre-load stock symbols on app startup for instant tab switching
+# This is a small, fast query that prevents delays on first tab load
+try:
+    stock_symbols_preloaded = get_stock_symbols_only()
+except:
+    stock_symbols_preloaded = []
 
 # Auto-refresh every 60 seconds
 REFRESH_INTERVAL = 300
@@ -1461,35 +1483,72 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
     
     with tab5:
         st.markdown("### Stock Analytics & Comparison")
-        stocks_df = get_cached_stocks_df()
-        stock_symbols = stocks_df['symbol'].tolist() if not stocks_df.empty else []
-        if not stock_symbols:
-            st.info("No stocks available for analytics. Add stocks to view analytics.")
+        
+        # Use pre-loaded data - no database calls on tab load!
+        if not stock_symbols_preloaded:
+            st.warning("No stocks available for analytics. Add stocks in the sidebar to get started.")
         else:
+            # Clean UI - no unnecessary messages
+            
+            # Use pre-loaded symbols - no database calls
+            def get_stock_symbols_lazy():
+                return stock_symbols_preloaded
             # --- 7-Day Stock Performance Table ---
-            st.markdown("#### 📈 7-Day Stock Performance")
+            st.markdown("#### 📈 Stock Performance Analysis")
+            
+            # Input controls with form to prevent auto-rerun
+            with st.form("performance_analysis_form"):
+                perf_col1, perf_col2, perf_col3 = st.columns([1, 2, 1])
+                
+                with perf_col1:
+                    num_days = st.number_input(
+                        "Number of Days", 
+                        min_value=1, 
+                        max_value=7, 
+                        value=7, 
+                        step=1,
+                        key="performance_days",
+                        help="Select how many trading days to analyze (max 7)"
+                    )
+                
+                with perf_col2:
+                    stock_source = st.selectbox(
+                        "Stock Source",
+                        options=["Portfolio Stocks", "System Stocks", "Both"],
+                        index=2,  # Default to "Both"
+                        key="stock_source",
+                        help="Portfolio: from trades | System: from stocks table | Both: combined"
+                    )
+                
+                with perf_col3:
+                    st.markdown("<div style='height:1.7em'></div>", unsafe_allow_html=True)  # Align button
+                    show_performance = st.form_submit_button("📊 Analyze Performance", use_container_width=True)
             
             @st.cache_data(ttl=300)  # Cache for 5 minutes
-            def get_7day_performance():
+            def get_performance_data(symbols_list, days_count):
                 try:
                     # Query prices from database
                     prices_collection = db.prices
                     performance_data = []
                     
-                    for symbol in stock_symbols:
+                    for symbol in symbols_list:
                         row_data = {"Symbol": symbol}
                         
-                        # Get recent records for this symbol (more than 7 to ensure we get 7 unique dates)
+                        # Get recent records for this symbol (get more to ensure we have enough data)
                         recent_docs = list(prices_collection.find(
                             {"symbol": symbol},
                             sort=[("fetched_at", -1)]
-                        ).limit(50))  # Get more records to find unique days
+                        ).limit(1000))  # High limit to ensure we get at least 30 days of data
+                        
+
                         
                         if recent_docs:
                             from datetime import datetime
                             
                             # Group by date and keep only the latest record per date (excluding weekends)
                             date_records = {}
+
+                            
                             for doc in recent_docs:
                                 fetched_at = doc.get('fetched_at')
                                 if fetched_at:
@@ -1511,17 +1570,33 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                                     if weekday >= 5:
                                         continue
                                     
-                                    # Keep only the latest record for each date (since we sorted by fetched_at desc)
+                                    # Group all records by date first
                                     if date_str not in date_records:
-                                        date_records[date_str] = doc
+                                        date_records[date_str] = []
+                                    date_records[date_str].append(doc)
                             
-                            # Sort dates and take the last 7 unique trading days
-                            sorted_dates = sorted(date_records.keys(), reverse=True)[:7]
+
+                            
+                            # For each date, find the record with the latest timestamp
+                            final_date_records = {}
+                            for date_str, docs_for_date in date_records.items():
+                                if docs_for_date:
+                                    # Sort by fetched_at to get the latest one for this date
+                                    latest_doc = max(docs_for_date, key=lambda x: x.get('fetched_at', ''))
+                                    final_date_records[date_str] = latest_doc
+                            
+
+                            
+                            # Sort dates and take the last N unique trading days
+                            all_dates = sorted(final_date_records.keys(), reverse=True)
+                            sorted_dates = all_dates[:days_count]
                             sorted_dates.reverse()  # Oldest to newest for display
+                            
+
                             
                             # Extract percentages for each unique date
                             for date_str in sorted_dates:
-                                doc = date_records[date_str]
+                                doc = final_date_records[date_str]
                                 percentage = doc.get('percentage', '0%')
                                 
                                 # Clean percentage string and convert to float
@@ -1546,7 +1621,7 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                             # Calculate net change by summing all daily percentage changes
                             daily_percentages = []
                             for date_str in sorted_dates:
-                                doc = date_records[date_str]
+                                doc = final_date_records[date_str]
                                 percentage = doc.get('percentage', '0%')
                                 
                                 # Clean percentage string and convert to float
@@ -1566,11 +1641,7 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                                 net_change = sum(daily_percentages)
                                 row_data["_net_change"] = net_change
                                 
-                                # Debug for first symbol
-                                if symbol == stock_symbols[0]:
-                                    st.write(f"Debug Net Change for {symbol}:")
-                                    st.write(f"Daily percentages: {daily_percentages}")
-                                    st.write(f"Sum (Net Change): {net_change:.2f}%")
+
                             else:
                                 row_data["_net_change"] = None
                         else:
@@ -1590,10 +1661,11 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                         date_columns.sort()
                         
                         # Reorder: Symbol, then date columns, then Net Change
-                        column_order = ['Symbol'] + date_columns + ['Net Change (7d)']
+                        net_change_col = f'Net Change ({days_count}d)'
+                        column_order = ['Symbol'] + date_columns + [net_change_col]
                         
-                        # Rename _net_change to Net Change (7d)
-                        df = df.rename(columns={'_net_change': 'Net Change (7d)'})
+                        # Rename _net_change to Net Change (Nd)
+                        df = df.rename(columns={'_net_change': net_change_col})
                         
                         # Reorder columns
                         df = df.reindex(columns=column_order)
@@ -1606,14 +1678,52 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     st.error(traceback.format_exc())
                     return pd.DataFrame()
             
-            perf_df = get_7day_performance()
+            # Only generate data when button is clicked
+            if show_performance:
+                # Get the appropriate symbols based on selection
+                if stock_source == "Portfolio Stocks":
+                    analysis_symbols = portfolio_symbols
+                elif stock_source == "System Stocks":
+                    analysis_symbols = get_stock_symbols_lazy()
+                else:  # Both
+                    analysis_symbols = list(set(portfolio_symbols + get_stock_symbols_lazy()))
+                
+                if not analysis_symbols:
+                    st.warning(f"No symbols available for {stock_source.lower()}. Add some stocks or trades first.")
+                    perf_df = pd.DataFrame()
+                else:
+                    st.info(f"Analyzing {len(analysis_symbols)} symbols from {stock_source.lower()} for the last {num_days} trading days.")
+                    perf_df = get_performance_data(analysis_symbols, num_days)
+            else:
+                perf_df = pd.DataFrame()
             
             if not perf_df.empty:
-                # Prepare display dataframe
+                # Prepare display dataframe with enhanced visuals
                 display_df = perf_df.copy()
                 
-                # Format percentage columns with color coding
-                def format_percentage(val):
+                # Analyze performance patterns for highlighting
+                net_change_col = f'Net Change ({num_days}d)'
+                percentage_cols = [col for col in display_df.columns if col not in ["Symbol", net_change_col]]
+                
+                # Identify consistent performers
+                all_green_stocks = []  # All positive days
+                all_red_stocks = []    # All negative days
+                mixed_stocks = []      # Mixed performance
+                
+                for idx, row in display_df.iterrows():
+                    symbol = row['Symbol']
+                    daily_values = [row[col] for col in percentage_cols if pd.notna(row[col])]
+                    
+                    if daily_values:
+                        if all(val > 0 for val in daily_values):
+                            all_green_stocks.append(symbol)
+                        elif all(val < 0 for val in daily_values):
+                            all_red_stocks.append(symbol)
+                        else:
+                            mixed_stocks.append(symbol)
+                
+                # Enhanced formatting function with badges
+                def format_percentage_enhanced(val, symbol, col_name):
                     if pd.isna(val) or val is None:
                         return "-"
                     
@@ -1625,16 +1735,34 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                     else:
                         return f"⚪ {formatted}"
                 
-                # Apply formatting to percentage columns (excluding Symbol and Net Change)
-                percentage_cols = [col for col in display_df.columns if col not in ["Symbol", "Net Change (7d)"]]
+                # Keep symbols clean - no badges in the table
+                
+                # Format percentage columns
                 for col in percentage_cols:
                     if col in display_df.columns:
-                        display_df[col] = display_df[col].apply(format_percentage)
+                        display_df[col] = display_df.apply(
+                            lambda row: format_percentage_enhanced(row[col], row['Symbol'], col), 
+                            axis=1
+                        )
                 
                 # Format Net Change column
-                if "Net Change (7d)" in display_df.columns:
-                    display_df["Net Change (7d)"] = display_df["Net Change (7d)"].apply(format_percentage)
+                if net_change_col in display_df.columns:
+                    display_df[net_change_col] = display_df.apply(
+                        lambda row: format_percentage_enhanced(row[net_change_col], row['Symbol'], net_change_col), 
+                        axis=1
+                    )
                 
+                # Show simple performance summary if there are consistent performers
+                if all_green_stocks or all_red_stocks:
+                    perf_summary = []
+                    if all_green_stocks:
+                        perf_summary.append(f"🚀 Consistent Gainers: {', '.join(all_green_stocks)}")
+                    if all_red_stocks:
+                        perf_summary.append(f"📉 Consistent Decliners: {', '.join(all_red_stocks)}")
+                    
+                    st.info(" | ".join(perf_summary))
+                
+                # Clean, simple dataframe display
                 st.dataframe(
                     display_df,
                     use_container_width=True,
@@ -1647,18 +1775,27 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
                 )
                 
                 st.caption("🟢 Positive | 🔴 Negative | ⚪ No Change | - No Data")
-                st.caption("*Shows the last 7 days of price data with daily percentage changes.*")
+                st.caption(f"*Shows the last {num_days} trading days of price data with daily percentage changes from {stock_source.lower()}.*")
                 
-            else:
-                st.info("📊 No price data available for 7-day performance analysis.")
+            # else:
+                # Clean UI - removed unnecessary "no data" message
             
             st.markdown("---")  # Separator
             # --- Single Stock Analytics ---
             st.markdown("#### Single Stock Analytics")
             with st.form("analytics_form"):
-                selected_stock = st.selectbox("Select Stock for Analysis", stock_symbols, key="analytics_single_stock")
-                show_analytics = st.form_submit_button("Show Analytics")
-            if show_analytics:
+                # Load symbols only when form is displayed
+                available_symbols = get_stock_symbols_lazy()
+                if not available_symbols:
+                    st.warning("No stocks available. Add stocks in the sidebar first.")
+                    selected_stock = None
+                    show_analytics = False
+                else:
+                    selected_stock = st.selectbox("Select Stock for Analysis", available_symbols, key="analytics_single_stock")
+                    show_analytics = st.form_submit_button("Show Analytics")
+            if show_analytics and selected_stock:
+                # Load full stocks data only when analytics is requested
+                stocks_df = get_cached_stocks_df()
                 stock_row = stocks_df[stocks_df['symbol'] == selected_stock.upper()]
                 if not stock_row.empty:
                     stock_data = stock_row.iloc[0]
@@ -1779,9 +1916,19 @@ if not portfolio_df.empty and portfolio_df['Market Value'].sum() > 0:
             # --- Multi-Stock Comparison ---
             st.markdown("#### Multi-Stock Comparison")
             with st.form("multi_stock_comparison_form"):
-                compare_stocks = st.multiselect("Select Stocks to Compare", stock_symbols, default=stock_symbols[:2], key="analytics_multi_stock")
-                compare_submitted = st.form_submit_button("Compare")
+                # Load symbols only when form is displayed
+                available_symbols = get_stock_symbols_lazy()
+                if not available_symbols:
+                    st.warning("No stocks available. Add stocks in the sidebar first.")
+                    compare_stocks = []
+                    compare_submitted = False
+                else:
+                    default_stocks = available_symbols[:2] if len(available_symbols) >= 2 else available_symbols
+                    compare_stocks = st.multiselect("Select Stocks to Compare", available_symbols, default=default_stocks, key="analytics_multi_stock")
+                    compare_submitted = st.form_submit_button("Compare")
             if compare_submitted and compare_stocks:
+                # Load full stocks data only when comparison is requested
+                stocks_df = get_cached_stocks_df()
                 comp_df = stocks_df[stocks_df['symbol'].isin(compare_stocks)]
                 # Compare EPS (latest year), Profit after Tax, Net Profit Margin, PEG, Dividend Count
                 comp_data = []
