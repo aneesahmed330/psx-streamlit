@@ -46,9 +46,9 @@ def is_trading_time():
     if pkt_now.weekday() > 4:  # 5=Saturday, 6=Sunday
         return False
     
-    # Check if time is between 9:00 and 16:00 (4PM)
+    # Check if time is between 9:00 and 17:00 (5PM)
     trading_start = time(9, 0)
-    trading_end = time(16, 0)
+    trading_end = time(17, 0)
     current_time = pkt_now.time()
     
     return trading_start <= current_time <= trading_end
