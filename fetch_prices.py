@@ -8,12 +8,14 @@ from pymongo import MongoClient
 from dotenv import load_dotenv
 import concurrent.futures
 import random
+import threading
 
 load_dotenv()
 # MONGO_URI = os.getenv("MONGO_URI")
 MONGO_URI = "mongodb+srv://coolminded682:7JogkfWtfUZcCWkZ@cluster0.zv3vun7.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 # DB_NAME = os.getenv("DB_NAME")
 DB_NAME = "psx_portfolio"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1410715166571761735/aZ6QVaOuQiiMNpTpPNYK5T2KLF_olkR0ba4I3NjZufqFfXB548Pnxsh7XFXXTdvJfcGd"
 
 USER_AGENTS = [
     # Windows Chrome
@@ -53,10 +55,17 @@ def is_trading_time():
     
     return trading_start <= current_time <= trading_end
 
+# Global MongoDB connection (reused for performance)
+_mongo_client = None
+_mongo_db = None
+
 def get_mongo():
-    client = MongoClient(MONGO_URI)
-    db = client[DB_NAME]
-    return db
+    """Get MongoDB database connection (singleton pattern for performance)"""
+    global _mongo_client, _mongo_db
+    if _mongo_db is None:
+        _mongo_client = MongoClient(MONGO_URI)
+        _mongo_db = _mongo_client[DB_NAME]
+    return _mongo_db
 
 def fetch_price(symbol):
     url = f"https://dps.psx.com.pk/company/{symbol}"
@@ -105,7 +114,75 @@ def fetch_price(symbol):
             direction = "-"
     return price, change_value, percentage, direction
 
-def save_price(symbol, price, change_value, percentage, direction):
+def send_discord_notification(symbol, price, change_value, percentage, direction, alert):
+    """Send a Discord notification when an alert is triggered (non-blocking)"""
+    try:
+        # Determine color based on direction
+        color = 0x00E396 if direction == "+" else 0xFF4560 if direction == "-" else 0x3498DB
+        
+        # Format the message
+        title = f"🚨 Alert Triggered: {symbol}"
+        description = f"**Current Price:** Rs. {price:.2f}\n"
+        description += f"**Price Range:** Rs. {alert['min_price']:.2f} - Rs. {alert['max_price']:.2f}\n"
+        
+        if change_value is not None:
+            change_emoji = "📈" if direction == "+" else "📉" if direction == "-" else "➡️"
+            description += f"**Change:** {change_emoji} {direction}{abs(change_value):.2f} ({percentage})\n"
+        
+        if 'trade_type' in alert:
+            description += f"**Trade Type:** {alert['trade_type']}\n"
+        if 'quantity' in alert:
+            description += f"**Quantity:** {alert['quantity']}\n"
+        if 'notes' in alert and alert['notes']:
+            description += f"**Notes:** {alert['notes']}\n"
+        
+        pkt_tz = pytz.timezone('Asia/Karachi')
+        pkt_now = datetime.now(pytz.utc).astimezone(pkt_tz)
+        description += f"\n**Time:** {pkt_now.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        
+        embed = {
+            "title": title,
+            "description": description,
+            "color": color,
+            "timestamp": datetime.now(pytz.utc).isoformat()
+        }
+        
+        payload = {
+            "embeds": [embed]
+        }
+        
+        # Send in a separate thread to avoid blocking
+        def send_async():
+            try:
+                response = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=5)
+                response.raise_for_status()
+                print(f"Discord notification sent for {symbol} alert")
+            except Exception as e:
+                print(f"Error sending Discord notification for {symbol}: {e}")
+        
+        thread = threading.Thread(target=send_async, daemon=True)
+        thread.start()
+        return True
+    except Exception as e:
+        print(f"Error preparing Discord notification for {symbol}: {e}")
+        return False
+
+def check_and_notify_alerts(symbol, price, change_value, percentage, direction, alerts_cache):
+    """Check if price triggers any enabled alerts and send notifications (using cached alerts)"""
+    try:
+        # Check cached alerts for this symbol (much faster than DB query)
+        symbol_alerts = alerts_cache.get(symbol, [])
+        
+        for alert in symbol_alerts:
+            # Check if price is within range
+            if alert['min_price'] <= price <= alert['max_price']:
+                # Send Discord notification (non-blocking)
+                send_discord_notification(symbol, price, change_value, percentage, direction, alert)
+    except Exception as e:
+        print(f"Error checking alerts for {symbol}: {e}")
+
+def save_price(symbol, price, change_value, percentage, direction, alerts_cache):
+    """Save price to database and check alerts (optimized with cached alerts)"""
     db = get_mongo()
     pkt_tz = pytz.timezone('Asia/Karachi')
     fetched_at = datetime.now(pkt_tz).isoformat()
@@ -117,17 +194,39 @@ def save_price(symbol, price, change_value, percentage, direction):
         'direction': direction,
         'fetched_at': fetched_at
     })
+    
+    # Check for alerts using cached data (fast in-memory lookup)
+    check_and_notify_alerts(symbol, price, change_value, percentage, direction, alerts_cache)
 
-def fetch_and_save_symbol(symbol):
+def fetch_and_save_symbol(symbol, alerts_cache):
+    """Fetch price and save it (optimized with alerts cache)"""
     try:
         price, change_value, percentage, direction = fetch_price(symbol)
         if price is not None:
-            save_price(symbol, price, change_value, percentage, direction)
+            save_price(symbol, price, change_value, percentage, direction, alerts_cache)
             print(f"Updated {symbol}: Price={price}, Change={change_value}, %={percentage}")
         else:
             print(f"No price found for {symbol}")
     except Exception as e:
         print(f"Error fetching {symbol}: {e}")
+
+def load_alerts_cache():
+    """Load all enabled alerts into memory for fast lookup"""
+    try:
+        db = get_mongo()
+        alerts = list(db.alerts.find({'enabled': True}))
+        # Group alerts by symbol for O(1) lookup
+        alerts_cache = {}
+        for alert in alerts:
+            symbol = alert['symbol']
+            if symbol not in alerts_cache:
+                alerts_cache[symbol] = []
+            alerts_cache[symbol].append(alert)
+        print(f"Loaded {len(alerts)} enabled alerts for {len(alerts_cache)} symbols")
+        return alerts_cache
+    except Exception as e:
+        print(f"Error loading alerts cache: {e}")
+        return {}
 
 def fetch_and_save_all():
     # Check if we're in trading hours
@@ -138,6 +237,10 @@ def fetch_and_save_all():
         return
     
     db = get_mongo()
+    
+    # Load alerts cache once (much faster than querying DB for each symbol)
+    alerts_cache = load_alerts_cache()
+    
     # Get symbols from both trades (actual portfolio) and stocks (for analytics)
     trades_symbols = list(db.trades.distinct("symbol"))
     stocks_symbols = list(db.stocks.distinct("symbol"))
@@ -153,9 +256,12 @@ def fetch_and_save_all():
     print(f"Found {len(stocks_symbols)} symbols from stocks: {stocks_symbols}")
     print(f"Total {len(all_symbols)} unique symbols to fetch: {all_symbols}")
     
-    tickers = all_symbols
+    # Use ThreadPoolExecutor with alerts_cache passed to each worker
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        executor.map(fetch_and_save_symbol, tickers)
+        # Pass alerts_cache to each worker function
+        futures = [executor.submit(fetch_and_save_symbol, symbol, alerts_cache) for symbol in all_symbols]
+        # Wait for all to complete
+        concurrent.futures.wait(futures)
 
 if __name__ == "__main__":
     fetch_and_save_all()
