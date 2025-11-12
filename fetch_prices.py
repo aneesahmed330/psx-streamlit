@@ -36,24 +36,25 @@ USER_AGENTS = [
 
 def is_trading_time():
     """Check if current time is within Pakistan trading hours (Mon-Fri, 9AM-4PM PKT)"""
-    # Create timezone objects
-    utc_tz = pytz.utc
-    pkt_tz = pytz.timezone('Asia/Karachi')
+    # # Create timezone objects
+    # utc_tz = pytz.utc
+    # pkt_tz = pytz.timezone('Asia/Karachi')
     
-    # Get current time in UTC and convert to PKT
-    utc_now = datetime.now(utc_tz)
-    pkt_now = utc_now.astimezone(pkt_tz)
+    # # Get current time in UTC and convert to PKT
+    # utc_now = datetime.now(utc_tz)
+    # pkt_now = utc_now.astimezone(pkt_tz)
     
-    # Check if it's a weekday (0=Monday, 4=Friday)
-    if pkt_now.weekday() > 4:  # 5=Saturday, 6=Sunday
-        return False
+    # # Check if it's a weekday (0=Monday, 4=Friday)
+    # if pkt_now.weekday() > 4:  # 5=Saturday, 6=Sunday
+    #     return False
     
-    # Check if time is between 9:00 and 17:00 (5PM)
-    trading_start = time(9, 0)
-    trading_end = time(17, 0)
-    current_time = pkt_now.time()
+    # # Check if time is between 9:00 and 17:00 (5PM)
+    # trading_start = time(9, 0)
+    # trading_end = time(17, 0)
+    # current_time = pkt_now.time()
     
-    return trading_start <= current_time <= trading_end
+    # return trading_start <= current_time <= trading_end
+    return true
 
 # Global MongoDB connection (reused for performance)
 _mongo_client = None
