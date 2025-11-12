@@ -54,7 +54,7 @@ def is_trading_time():
     # current_time = pkt_now.time()
     
     # return trading_start <= current_time <= trading_end
-    return true
+    return True
 
 # Global MongoDB connection (reused for performance)
 _mongo_client = None
